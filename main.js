@@ -57,28 +57,30 @@ function syncSystemEnvVars(modelConfig) {
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  // Build a single elevated PowerShell command — Start-Process -Wait
-  // ensures synchronous execution: command completes before we continue
-  const commands = [];
-  const addCmd = (name, value) => {
-    if (value) {
-      commands.push(`[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','Machine')`);
-    } else {
-      commands.push(`[Environment]::SetEnvironmentVariable('${name}',\$null,'Machine')`);
-    }
-  };
-
-  if (modelConfig.modelName) addCmd('ANTHROPIC_MODEL', modelConfig.modelName);
-  if (modelConfig.apiKey) addCmd('ANTHROPIC_API_KEY', modelConfig.apiKey);
-  if (modelConfig.baseUrl) addCmd('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
-  addCmd('ANTHROPIC_AUTH_TOKEN', null);
-
-  const script = commands.join('; ');
+  // Write commands to temp .ps1 file to avoid command-line escaping issues.
+  // Use Start-Process -Wait to run synchronously — returns AFTER all vars written.
+  const tmpDir = os.tmpdir();
+  const psFile = path.join(tmpDir, 'apex-machine-sync.ps1');
 
   try {
-    // Start-Process -Verb RunAs -Wait: UAC prompt → execute → return AFTER completion
+    const lines = [];
+    if (modelConfig.modelName) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
+    }
+    if (modelConfig.apiKey) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
+    }
+    if (modelConfig.baseUrl) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
+    }
+    lines.push(`Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue`);
+    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',[System.String]::Empty,'Machine')`);
+
+    fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
+
+    // Synchronous elevation: -Wait blocks until elevated process completes
     execSync(
-      `powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','${script}'"`,
+      `powershell -NoProfile -Command Start-Process -Verb RunAs -Wait -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${psFile.replace(/\\/g, '/')}'`,
       { timeout: 30000, windowsHide: true }
     );
 
@@ -95,6 +97,8 @@ function syncWindowsEnvVars(modelConfig) {
     return { success: mOk && kOk && uOk };
   } catch (_) {
     return { success: false, error: 'UAC 未通过' };
+  } finally {
+    try { fs.unlinkSync(psFile); } catch (_) {}
   }
 }
 
