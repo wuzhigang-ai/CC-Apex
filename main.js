@@ -51,8 +51,8 @@ function applyModelConfig(modelConfig) {
   if (!settings.env) settings.env = {};
 
   if (modelConfig.apiKey) {
-    settings.env.ANTHROPIC_AUTH_TOKEN = modelConfig.apiKey;
     settings.env.ANTHROPIC_API_KEY = modelConfig.apiKey;
+    delete settings.env.ANTHROPIC_AUTH_TOKEN;
   }
   if (modelConfig.baseUrl) {
     settings.env.ANTHROPIC_BASE_URL = modelConfig.baseUrl;
