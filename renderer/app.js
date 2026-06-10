@@ -166,9 +166,9 @@ async function handleSwitch(id) {
     render();
     const sync = result.envSync || {};
     if (!sync.success) {
-      showStatus('error', `系统环境变量写入失败（${sync.error || 'UAC 未通过'}），settings.json 已回滚，配置未变更`);
+      showStatus('error', `环境变量写入失败（${sync.error || '未知错误'}），settings.json 已回滚，配置未变更`);
     } else {
-      showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效 (settings.json + 系统变量 同步完成)`);
+      showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效 (settings.json + 环境变量 同步完成)`);
     }
     setTimeout(hideStatus, 6000);
   } else {

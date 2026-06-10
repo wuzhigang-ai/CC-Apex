@@ -1,8 +1,8 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 // ═══════════════════════════════════════════════════════════════════
 // Apex — Main Process (Production)
@@ -10,6 +10,29 @@ const { execSync } = require('child_process');
 
 const APP_NAME = 'Apex';
 const APP_VERSION = '1.0.0';
+
+// ── PowerShell Helper ───────────────────────────────────────────────
+// ALL PowerShell calls go through here — .ps1 file + spawnSync
+// Zero shell involvement, zero quoting issues, cross-platform safe
+function runPowerShell(commands) {
+  if (process.platform !== 'win32') return { stdout: '', stderr: '', status: 0 };
+  const tmpFile = path.join(os.tmpdir(), 'apex-ps-cmd.ps1');
+  try {
+    const lines = Array.isArray(commands) ? commands : [commands];
+    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
+    ], { timeout: 15000, windowsHide: true });
+    return {
+      stdout: result.stdout.toString().trim(),
+      stderr: result.stderr.toString().trim(),
+      status: result.status,
+      error: result.error,
+    };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+  }
+}
 
 // ── Paths ──────────────────────────────────────────────────────────
 const USER_DATA_DIR = app.getPath('userData');
@@ -50,43 +73,27 @@ function writeClaudeSettings(settings) {
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
-// ── System Env Var Sync (Machine-level, all platforms) ───────────────
+// ── System Env Var Sync (all platforms) ─────────────────────────────
 function syncSystemEnvVars(modelConfig) {
   if (process.platform === 'win32') return syncWindowsEnvVars(modelConfig);
   return syncUnixEnvVars(modelConfig);
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  // Write .ps1 file + call powershell.exe directly (no shell, no quoting hell)
-  const { spawnSync } = require('child_process');
-  const tmpFile = path.join(os.tmpdir(), 'apex-user-env.ps1');
-
-  try {
-    const lines = [];
-    if (modelConfig.modelName) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','User')`);
-    }
-    if (modelConfig.apiKey) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','User')`);
-    }
-    if (modelConfig.baseUrl) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','User')`);
-    }
-    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','User')`);
-
-    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
-
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
-    ], { timeout: 15000, windowsHide: true });
-
-    if (result.error) throw result.error;
-    return { success: true };
-  } catch (_) {
-    return { success: false, error: '写入用户环境变量失败' };
-  } finally {
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+  const commands = [];
+  if (modelConfig.modelName) {
+    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','User')`);
   }
+  if (modelConfig.apiKey) {
+    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','User')`);
+  }
+  if (modelConfig.baseUrl) {
+    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','User')`);
+  }
+  commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','User')`);
+
+  const result = runPowerShell(commands);
+  return { success: !result.error, error: result.error ? result.error.message : undefined };
 }
 
 function syncUnixEnvVars(modelConfig) {
@@ -169,17 +176,13 @@ function applyModelConfig(modelConfig) {
 // ── Auto-Start ──────────────────────────────────────────────────────
 function getAutoStartStatus() {
   if (process.platform === 'win32') {
-    try {
-      const out = execSync(
-        `powershell -NoProfile -Command "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction Stop | Select-Object -ExpandProperty '${AUTOSTART_KEY}'"`,
-        { timeout: 5000, windowsHide: true }
-      ).toString().trim();
-      return !!out;
-    } catch (_) { return false; }
+    const result = runPowerShell(
+      `(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction Stop).'${AUTOSTART_KEY}'`
+    );
+    return result.status === 0 && result.stdout.length > 0;
   }
   if (process.platform === 'darwin') {
-    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `com.apex.modelswitch.plist`);
-    return fs.existsSync(plist);
+    return fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.apex.modelswitch.plist'));
   }
   return false;
 }
@@ -187,15 +190,12 @@ function getAutoStartStatus() {
 function setAutoStart(enable) {
   if (process.platform === 'win32') {
     if (enable) {
-      const exePath = process.execPath;
-      execSync(
-        `powershell -NoProfile -Command "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -Value '${exePath}'"`,
-        { timeout: 5000, windowsHide: true }
+      runPowerShell(
+        `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -Value '${process.execPath}'`
       );
     } else {
-      execSync(
-        `powershell -NoProfile -Command "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction SilentlyContinue"`,
-        { timeout: 5000, windowsHide: true }
+      runPowerShell(
+        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction SilentlyContinue`
       );
     }
   }
@@ -204,14 +204,13 @@ function setAutoStart(enable) {
     const plist = path.join(launchDir, 'com.apex.modelswitch.plist');
     if (enable) {
       if (!fs.existsSync(launchDir)) fs.mkdirSync(launchDir, { recursive: true });
-      const content = `<?xml version="1.0" encoding="UTF-8"?>
+      fs.writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.apex.modelswitch</string>
   <key>ProgramArguments</key><array><string>${process.execPath}</string></array>
   <key>RunAtLoad</key><true/>
-</dict></plist>`;
-      fs.writeFileSync(plist, content);
+</dict></plist>`);
     } else {
       try { fs.unlinkSync(plist); } catch (_) {}
     }
