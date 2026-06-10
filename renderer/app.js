@@ -155,8 +155,8 @@ async function handleSwitch(id) {
   if (result.success) {
     activeConfigId = id;
     render();
-    showStatus('success', `已切换至「${escapeHtml(config.name)}」，即刻生效`);
-    setTimeout(hideStatus, 3000);
+    showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)}，新终端窗口生效`);
+    setTimeout(hideStatus, 5000);
   } else {
     showStatus('error', `切换失败：${result.error}`);
     setTimeout(hideStatus, 5000);
