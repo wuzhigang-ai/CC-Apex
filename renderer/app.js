@@ -80,8 +80,8 @@ function render() {
         <div class="card-info">
           <div class="card-name">${escapeHtml(c.name)}</div>
           <div class="card-meta">
-            <span>${escapeHtml(c.modelName || '—')}</span>
-            ${c.baseUrl ? `<span>${escapeHtml(c.baseUrl)}</span>` : ''}
+            <span class="meta-label">模型</span><span>${escapeHtml(c.modelName || '—')}</span>
+            ${c.baseUrl ? `<span class="meta-label">端点</span><span>${escapeHtml(c.baseUrl)}</span>` : ''}
           </div>
         </div>
         <span class="card-badge">${isActive ? '当前' : '备用'}</span>
