@@ -50,13 +50,13 @@ function writeClaudeSettings(settings) {
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
-// ── System Env Var Sync (Machine-level) ──────────────────────────────
+// ── System Env Var Sync (Machine-level, all platforms) ───────────────
 function syncSystemEnvVars(modelConfig) {
-  // Writes ANTHROPIC_MODEL / API_KEY / BASE_URL to Windows System env vars.
-  // Uses VBScript ShellExecute("runas") for UAC elevation.
-  // On non-Windows, no-op — macOS/Linux rely solely on settings.json.
-  if (process.platform !== 'win32') return { success: true };
+  if (process.platform === 'win32') return syncWindowsEnvVars(modelConfig);
+  return syncUnixEnvVars(modelConfig);
+}
 
+function syncWindowsEnvVars(modelConfig) {
   const tmpDir = os.tmpdir();
   const psFile = path.join(tmpDir, 'apex-machine-sync.ps1');
   const vbsFile = path.join(tmpDir, 'apex-machine-sync.vbs');
@@ -77,8 +77,6 @@ function syncSystemEnvVars(modelConfig) {
     addVar('ANTHROPIC_AUTH_TOKEN', null);
 
     fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
-
-    // VBScript: ShellExecute with "runas" verb for UAC elevation
     fs.writeFileSync(vbsFile,
       `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${psFile.replace(/\\/g, '\\\\')}""", "", "runas", 0`,
       'utf-8'
@@ -86,7 +84,6 @@ function syncSystemEnvVars(modelConfig) {
 
     execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
 
-    // Verify
     const check = execSync(
       `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('ANTHROPIC_MODEL','Machine')"`,
       { timeout: 3000, windowsHide: true }
@@ -98,6 +95,53 @@ function syncSystemEnvVars(modelConfig) {
   } finally {
     try { fs.unlinkSync(psFile); } catch (_) {}
     try { fs.unlinkSync(vbsFile); } catch (_) {}
+  }
+}
+
+function syncUnixEnvVars(modelConfig) {
+  // macOS / Linux: write /etc/profile.d/apex.sh via admin elevation
+  // This file is sourced by all login shells, providing system-wide env vars
+  const isMac = process.platform === 'darwin';
+
+  try {
+    const scriptContent = [
+      '# Managed by Apex Model Switch — do not edit manually',
+      `export ANTHROPIC_MODEL="${modelConfig.modelName || ''}"`,
+      `export ANTHROPIC_API_KEY="${modelConfig.apiKey || ''}"`,
+      `export ANTHROPIC_BASE_URL="${modelConfig.baseUrl || ''}"`,
+      'unset ANTHROPIC_AUTH_TOKEN',
+      '',
+    ].join('\n');
+
+    const tmpFile = path.join(os.tmpdir(), 'apex-profile-install');
+    const installScript = [
+      '#!/bin/bash',
+      'mkdir -p /etc/profile.d',
+      `cat > /etc/profile.d/apex.sh << 'APEX_EOF'`,
+      scriptContent,
+      'APEX_EOF',
+      'chmod 644 /etc/profile.d/apex.sh',
+    ].join('\n');
+
+    fs.writeFileSync(tmpFile, installScript, { mode: 0o755 });
+
+    if (isMac) {
+      // macOS: osascript with administrator privileges (GUI password prompt)
+      execSync(`osascript -e 'do shell script "bash ${tmpFile}" with administrator privileges'`, { timeout: 30000 });
+    } else {
+      // Linux: pkexec (GUI) or sudo (CLI)
+      try {
+        execSync(`pkexec bash ${tmpFile}`, { timeout: 30000 });
+      } catch (_) {
+        execSync(`sudo bash ${tmpFile}`, { timeout: 30000 });
+      }
+    }
+
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    return { success: fs.existsSync('/etc/profile.d/apex.sh') };
+  } catch (_) {
+    try { fs.unlinkSync(path.join(os.tmpdir(), 'apex-profile-install')); } catch (_) {}
+    return { success: false, error: '管理员授权未通过或超时' };
   }
 }
 
