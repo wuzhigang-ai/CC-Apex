@@ -16,8 +16,15 @@ const APP_VERSION = '1.0.0';
 // thread → deadlock with Windows message loop in Electron)
 function runFile(file, args, timeoutMs = 15000) {
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+
+    // Manual timeout: execFile timeout is unreliable on Windows
+    const timer = setTimeout(() => done({ error: new Error('ETIMEDOUT'), stdout: '', stderr: '' }), timeoutMs + 5000);
+
     execFile(file, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
-      resolve({ error: err, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
+      clearTimeout(timer);
+      done({ error: err, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
     });
   });
 }
@@ -82,9 +89,6 @@ async function syncSystemEnvVars(modelConfig) {
 }
 
 async function syncWindowsMachineEnvVars(modelConfig) {
-  // 1. Write .ps1 with SetEnvironmentVariable(Machine) commands
-  // 2. PowerShell Start-Process -Verb RunAs -Wait → UAC + sync write
-  // 3. execFile (async) → no Electron main thread blocking
   const psFile = path.join(os.tmpdir(), `apex-m-${Date.now().toString(36)}.ps1`);
 
   try {
@@ -102,30 +106,38 @@ async function syncWindowsMachineEnvVars(modelConfig) {
 
     fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
 
-    // async execFile → no main-thread blocking → no timeout
-    // Start-Process -Verb RunAs -Wait → UAC prompt → sync write → return
-    const { error } = await runFile('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy', 'Bypass',
-      '-Command',
+    // Fire-and-forget: launch elevated PowerShell. May return before UAC
+    // is approved or after. We don't trust execFile's exit code.
+    await runFile('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
       `Start-Process -Verb RunAs -Wait -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${psFile.replace(/\\/g, '/')}'`
-    ], 60000);
+    ], 120000); // 2 min for UAC
 
     try { fs.unlinkSync(psFile); } catch (_) {}
 
-    if (error) return { success: false, error: 'UAC 未通过或超时' };
-
-    // Verify
+    // Verify actual Machine values — the ONLY source of truth
     const { stdout } = await runFile('powershell.exe', [
       '-NoProfile', '-Command', '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
-    ], 10000);
+    ], 15000);
 
     const actualModel = stdout.trim();
     const expectedModel = modelConfig.modelName || '';
-    return { success: actualModel === expectedModel, error: actualModel !== expectedModel ? '写入后验证失败' : undefined };
+
+    // Trust the actual values, not the execFile result
+    if (actualModel === expectedModel) return { success: true };
+
+    // If model doesn't match, check if UAC was denied vs just pending
+    return { success: false, error: actualModel ? '部分写入：仅 MODEL 已更新' : 'UAC 未通过：系统环境变量未更新' };
 
   } catch (_) {
     try { fs.unlinkSync(psFile); } catch (_) {}
+    // Even if we crashed, check if vars made it through
+    try {
+      const { stdout } = await runFile('powershell.exe', [
+        '-NoProfile', '-Command', '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
+      ], 5000);
+      if (stdout.trim() === (modelConfig.modelName || '')) return { success: true };
+    } catch (_) {}
     return { success: false, error: '系统环境变量写入异常' };
   }
 }
