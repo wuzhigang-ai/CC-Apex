@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════
-// Apex — Application Logic
+// Apex — Application Logic (Production)
 // ═══════════════════════════════════════════════════════════════════
 
 const $ = (sel) => document.querySelector(sel);
@@ -21,14 +21,19 @@ const modalOverlay = $('#modal-overlay');
 const modalTitle = $('#modal-title');
 const configForm = $('#config-form');
 const confirmOverlay = $('#confirm-overlay');
+const aboutOverlay = $('#about-overlay');
+const aboutInfo = $('#about-info');
 
 // ── Init ──────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   setupTitlebar();
   setupModal();
   setupConfirm();
+  setupAbout();
+  setupImportExport();
   await loadConfigs();
   await checkCurrentSettings();
+  await loadAppInfo();
 });
 
 // ── Title Bar ─────────────────────────────────────────────────────
@@ -45,18 +50,25 @@ async function loadConfigs() {
 
 async function checkCurrentSettings() {
   try {
-    const { settings, configPath } = await window.apex.getCurrentSettings();
+    const { settings } = await window.apex.getCurrentSettings();
     if (settings && settings.model) {
-      // Try to match against saved configs
       const match = configs.find((c) => {
-        const modelMatch = c.modelName === settings.model;
-        const keyMatch = !c.apiKey || (settings.env && (
-          settings.env.ANTHROPIC_AUTH_TOKEN === c.apiKey ||
-          settings.env.ANTHROPIC_API_KEY === c.apiKey
-        ));
-        return modelMatch || keyMatch;
+        return c.modelName === settings.model ||
+          (settings.env && (
+            settings.env.ANTHROPIC_API_KEY === c.apiKey ||
+            settings.env.ANTHROPIC_BASE_URL === c.baseUrl
+          ));
       });
       if (match) activeConfigId = match.id;
+    }
+  } catch (_) {}
+}
+
+async function loadAppInfo() {
+  try {
+    const info = await window.apex.getAppInfo();
+    if (info && aboutInfo) {
+      aboutInfo.innerHTML = `<span class="about-meta">版本 ${info.version} · Electron ${info.electron} · ${info.platform === 'win32' ? 'Windows' : info.platform === 'darwin' ? 'macOS' : info.platform}</span>`;
     }
   } catch (_) {}
 }
@@ -109,7 +121,7 @@ function render() {
     `;
   }).join('');
 
-  // Delegate card events
+  configCards.removeEventListener('click', handleCardClick);
   configCards.addEventListener('click', handleCardClick);
 }
 
@@ -117,7 +129,6 @@ function handleCardClick(e) {
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const id = btn.dataset.id;
-
   switch (btn.dataset.action) {
     case 'switch': handleSwitch(id); break;
     case 'edit': openEditor(id); break;
@@ -137,10 +148,8 @@ async function handleSwitch(id) {
   const config = configs.find((c) => c.id === id);
   if (!config) return;
 
-  // Add switching state
   const card = document.querySelector(`[data-id="${id}"]`);
   card.classList.add('switching');
-
   showStatus('info', '正在切换模型配置...');
 
   const result = await window.apex.switchModel({
@@ -155,7 +164,10 @@ async function handleSwitch(id) {
   if (result.success) {
     activeConfigId = id;
     render();
-    showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)}，新终端窗口生效（配置文件 + 系统变量已同步更新）`);
+    const envNote = result.envSync && result.envSync.success
+      ? ' · 系统环境变量已同步'
+      : '';
+    showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端窗口生效${envNote}`);
     setTimeout(hideStatus, 6000);
   } else {
     showStatus('error', `切换失败：${result.error}`);
@@ -198,7 +210,6 @@ async function saveConfig(e) {
 function openEditor(id) {
   const config = configs.find((c) => c.id === id);
   if (!config) return;
-
   editingConfigId = id;
   modalTitle.textContent = '编辑备用方案';
   $('#form-id').value = config.id;
@@ -234,7 +245,6 @@ function confirmDelete(id) {
 
 async function executeDelete() {
   if (!pendingDeleteId) return;
-
   const result = await window.apex.deleteConfig(pendingDeleteId);
   if (result.success) {
     configs = result.configs;
@@ -252,6 +262,49 @@ function closeConfirm() {
   pendingDeleteId = null;
 }
 
+// ── Export / Import ──────────────────────────────────────────────
+function setupImportExport() {
+  $('#btn-export').addEventListener('click', async () => {
+    const result = await window.apex.exportConfigs();
+    if (result.success) {
+      showStatus('success', `配置已导出 (API 密钥已脱敏)`);
+      setTimeout(hideStatus, 3000);
+    }
+  });
+
+  $('#btn-import').addEventListener('click', async () => {
+    const result = await window.apex.importConfigs();
+    if (result.success) {
+      configs = result.configs;
+      render();
+      showStatus('success', `已导入 ${result.count || 0} 个新方案`);
+      setTimeout(hideStatus, 3000);
+    } else if (result.error) {
+      showStatus('error', result.error);
+      setTimeout(hideStatus, 4000);
+    }
+  });
+}
+
+// ── About ────────────────────────────────────────────────────────
+function setupAbout() {
+  $('#about-close').addEventListener('click', () => aboutOverlay.classList.add('hidden'));
+  aboutOverlay.addEventListener('click', (e) => {
+    if (e.target === aboutOverlay) aboutOverlay.classList.add('hidden');
+  });
+
+  // Listen for tray menu about trigger
+  window.apex.onShowAbout(() => {
+    aboutOverlay.classList.remove('hidden');
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !aboutOverlay.classList.contains('hidden')) {
+      aboutOverlay.classList.add('hidden');
+    }
+  });
+}
+
 // ── Modal Setup ──────────────────────────────────────────────────
 function setupModal() {
   $('#btn-add').addEventListener('click', openCreator);
@@ -260,18 +313,15 @@ function setupModal() {
   $('#modal-cancel').addEventListener('click', closeModal);
   configForm.addEventListener('submit', saveConfig);
 
-  // Close modal on overlay click
   modalOverlay.addEventListener('click', (e) => {
     if (e.target === modalOverlay) closeModal();
   });
 
-  // Toggle password visibility
   $('#toggle-key').addEventListener('click', () => {
     const input = $('#form-key');
     input.type = input.type === 'password' ? 'text' : 'password';
   });
 
-  // Escape to close
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!modalOverlay.classList.contains('hidden')) closeModal();
@@ -283,7 +333,6 @@ function setupModal() {
 function setupConfirm() {
   $('#confirm-cancel').addEventListener('click', closeConfirm);
   $('#confirm-ok').addEventListener('click', executeDelete);
-
   confirmOverlay.addEventListener('click', (e) => {
     if (e.target === confirmOverlay) closeConfirm();
   });

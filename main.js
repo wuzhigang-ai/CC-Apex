@@ -1,24 +1,29 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync } = require('child_process');
 
+// ═══════════════════════════════════════════════════════════════════
+// Apex — Main Process (Production)
+// ═══════════════════════════════════════════════════════════════════
+
+const APP_NAME = 'Apex';
+const APP_VERSION = '1.0.0';
+
 // ── Paths ──────────────────────────────────────────────────────────
 const USER_DATA_DIR = app.getPath('userData');
 const CONFIGS_FILE = path.join(USER_DATA_DIR, 'model-configs.json');
+const AUTOSTART_KEY = 'ApexModelSwitch';
 
 function getClaudeSettingsPath() {
-  const home = os.homedir();
-  return path.join(home, '.claude', 'settings.json');
+  return path.join(os.homedir(), '.claude', 'settings.json');
 }
 
 // ── Configs CRUD ────────────────────────────────────────────────────
 function loadConfigs() {
   try {
-    if (fs.existsSync(CONFIGS_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8'));
-    }
+    if (fs.existsSync(CONFIGS_FILE)) return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8'));
   } catch (_) {}
   return [];
 }
@@ -31,8 +36,8 @@ function saveConfigs(configs) {
 
 // ── Claude Code Settings ────────────────────────────────────────────
 function readClaudeSettings() {
-  const p = getClaudeSettingsPath();
   try {
+    const p = getClaudeSettingsPath();
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf-8'));
   } catch (_) {}
   return null;
@@ -45,41 +50,30 @@ function writeClaudeSettings(settings) {
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
+// ── Windows Env Var Sync ────────────────────────────────────────────
 function syncWindowsEnvVars(modelConfig) {
-  // Only on Windows; no-op on other platforms
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') return { success: true };
+  const results = [];
   try {
-    if (modelConfig.modelName) {
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName}','User')"`,
-        { timeout: 5000, windowsHide: true }
-      );
-    }
-    if (modelConfig.apiKey) {
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey}','User')"`,
-        { timeout: 5000, windowsHide: true }
-      );
-    }
-    if (modelConfig.baseUrl) {
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl}','User')"`,
-        { timeout: 5000, windowsHide: true }
-      );
-    }
-    // Also clean up AUTH_TOKEN to avoid conflicts
-    execSync(
-      `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User')"`,
-      { timeout: 5000, windowsHide: true }
-    );
+    const setVar = (name, value) => {
+      const cmd = value
+        ? `[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','User')`
+        : `[Environment]::SetEnvironmentVariable('${name}',$null,'User')`;
+      execSync(`powershell -NoProfile -Command "${cmd}"`, { timeout: 5000, windowsHide: true });
+    };
+
+    if (modelConfig.modelName) setVar('ANTHROPIC_MODEL', modelConfig.modelName);
+    if (modelConfig.apiKey) setVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
+    if (modelConfig.baseUrl) setVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
+    setVar('ANTHROPIC_AUTH_TOKEN', null); // Cleanse to avoid conflicts
+    return { success: true };
   } catch (err) {
-    console.error('Failed to sync Windows env vars:', err.message);
+    return { success: false, error: err.message };
   }
 }
 
 function applyModelConfig(modelConfig) {
-  let settings = readClaudeSettings() || {};
-
+  const settings = readClaudeSettings() || {};
   if (!settings.env) settings.env = {};
 
   if (modelConfig.apiKey) {
@@ -97,11 +91,60 @@ function applyModelConfig(modelConfig) {
   }
 
   writeClaudeSettings(settings);
-
-  // Also sync to Windows system env vars for double guarantee
-  syncWindowsEnvVars(modelConfig);
-
   return settings;
+}
+
+// ── Auto-Start ──────────────────────────────────────────────────────
+function getAutoStartStatus() {
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync(
+        `powershell -NoProfile -Command "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction Stop | Select-Object -ExpandProperty '${AUTOSTART_KEY}'"`,
+        { timeout: 5000, windowsHide: true }
+      ).toString().trim();
+      return !!out;
+    } catch (_) { return false; }
+  }
+  if (process.platform === 'darwin') {
+    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `com.apex.modelswitch.plist`);
+    return fs.existsSync(plist);
+  }
+  return false;
+}
+
+function setAutoStart(enable) {
+  if (process.platform === 'win32') {
+    if (enable) {
+      const exePath = process.execPath;
+      execSync(
+        `powershell -NoProfile -Command "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -Value '${exePath}'"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    } else {
+      execSync(
+        `powershell -NoProfile -Command "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction SilentlyContinue"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    }
+  }
+  if (process.platform === 'darwin') {
+    const launchDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+    const plist = path.join(launchDir, 'com.apex.modelswitch.plist');
+    if (enable) {
+      if (!fs.existsSync(launchDir)) fs.mkdirSync(launchDir, { recursive: true });
+      const content = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.apex.modelswitch</string>
+  <key>ProgramArguments</key><array><string>${process.execPath}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>`;
+      fs.writeFileSync(plist, content);
+    } else {
+      try { fs.unlinkSync(plist); } catch (_) {}
+    }
+  }
+  return getAutoStartStatus();
 }
 
 // ── Window ──────────────────────────────────────────────────────────
@@ -128,79 +171,70 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
-
   mainWindow.on('close', (e) => {
-    if (tray) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+    if (tray) { e.preventDefault(); mainWindow.hide(); }
   });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 // ── Tray ────────────────────────────────────────────────────────────
 function createTrayIcon() {
-  // Generate a 16x16 gold diamond as tray icon
   const size = 16;
-  const canvas = Buffer.alloc(size * size * 4, 0);
-  const cx = size / 2;
-  const cy = size / 2;
-  const r = 6;
-
+  const buf = Buffer.alloc(size * size * 4, 0);
+  const cx = size / 2, cy = size / 2, r = 6;
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const dx = Math.abs(x - cx);
-      const dy = Math.abs(y - cy);
-      // Diamond shape
+      const dx = Math.abs(x - cx), dy = Math.abs(y - cy);
       const inside = (dx / r + dy / r) <= 1.05;
-      const edge = (dx / r + dy / r) > 0.85 && (dx / r + dy / r) <= 1.05;
-
-      const i = (y * size + x) * 4;
       if (inside) {
-        // Gold accent
-        canvas[i] = 0xC9;     // R
-        canvas[i + 1] = 0xA5; // G
-        canvas[i + 2] = 0x5C; // B
-        canvas[i + 3] = edge ? 220 : 255; // A
+        const i = (y * size + x) * 4;
+        buf[i] = 0xC9; buf[i + 1] = 0xA5; buf[i + 2] = 0x5C; buf[i + 3] = 255;
       }
     }
   }
-  return nativeImage.createFromBuffer(canvas, { width: size, height: size });
+  return nativeImage.createFromBuffer(buf, { width: size, height: size });
 }
 
 function createTray() {
   tray = new Tray(createTrayIcon());
-  tray.setToolTip('Apex — Model Switch');
+  tray.setToolTip(`${APP_NAME} — Model Switch v${APP_VERSION}`);
+  tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
+  updateTrayMenu();
+}
 
+function updateTrayMenu() {
+  if (!tray) return;
+  const autoStart = getAutoStartStatus();
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show Apex', click: () => { mainWindow.show(); mainWindow.focus(); } },
+    { type: 'separator' },
+    {
+      label: 'Launch at Startup',
+      type: 'checkbox',
+      checked: autoStart,
+      click: (mi) => { const ok = setAutoStart(mi.checked); mi.checked = ok; }
+    },
+    { type: 'separator' },
+    { label: 'About Apex', click: () => { mainWindow.webContents.send('show-about'); mainWindow.show(); mainWindow.focus(); } },
     { type: 'separator' },
     { label: 'Quit Apex', click: () => { tray = null; app.quit(); } },
   ]);
   tray.setContextMenu(contextMenu);
-  tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
 }
 
 // ── IPC ─────────────────────────────────────────────────────────────
 function registerIpc() {
+  // Config CRUD
   ipcMain.handle('get-configs', () => loadConfigs());
 
   ipcMain.handle('save-config', (_e, config) => {
     const configs = loadConfigs();
     if (config.id) {
       const i = configs.findIndex((c) => c.id === config.id);
-      if (i >= 0) {
-        configs[i] = { ...configs[i], ...config, updatedAt: Date.now() };
-      } else {
-        configs.push({ ...config, id: generateId(), createdAt: Date.now(), updatedAt: Date.now() });
-      }
+      if (i >= 0) configs[i] = { ...configs[i], ...config, updatedAt: Date.now() };
+      else configs.push({ ...config, id: generateId(), createdAt: Date.now(), updatedAt: Date.now() });
     } else {
-      config.id = generateId();
-      config.createdAt = Date.now();
-      config.updatedAt = Date.now();
+      config.id = generateId(); config.createdAt = Date.now(); config.updatedAt = Date.now();
       configs.push(config);
     }
     saveConfigs(configs);
@@ -208,42 +242,102 @@ function registerIpc() {
   });
 
   ipcMain.handle('delete-config', (_e, id) => {
-    let configs = loadConfigs();
-    configs = configs.filter((c) => c.id !== id);
+    const configs = loadConfigs().filter((c) => c.id !== id);
     saveConfigs(configs);
     return { success: true, configs };
   });
 
+  // Model Switch
   ipcMain.handle('switch-model', (_e, config) => {
     try {
       const p = getClaudeSettingsPath();
-      if (!fs.existsSync(p)) {
-        return {
-          success: false,
-          error: `未找到 Claude Code 配置文件\n预期路径: ${p}\n\n请确认 Claude Code 已正确安装。`,
-          path: p,
-        };
-      }
-      const result = applyModelConfig(config);
-      return { success: true, settings: result, path: p };
+      const settings = applyModelConfig(config);
+      const envResult = syncWindowsEnvVars(config);
+      return {
+        success: true,
+        settings,
+        path: p,
+        envSync: envResult,
+      };
     } catch (err) {
-      return { success: false, error: `写入失败: ${err.message}\n请检查文件权限。` };
+      return { success: false, error: `写入失败: ${err.message}` };
     }
   });
 
+  // Claude Code detection
   ipcMain.handle('get-current-settings', () => {
     const settings = readClaudeSettings();
-    const p = getClaudeSettingsPath();
-    return { settings, configPath: p, exists: fs.existsSync(p) };
+    return { settings, configPath: getClaudeSettingsPath() };
   });
 
   ipcMain.handle('detect-claude', () => {
     const p = getClaudeSettingsPath();
-    const exists = fs.existsSync(p);
-    const dirExists = fs.existsSync(path.dirname(p));
-    return { exists, path: p, claudeDirExists: dirExists };
+    return { exists: fs.existsSync(p), path: p };
   });
 
+  // Export / Import
+  ipcMain.handle('export-configs', async () => {
+    const configs = loadConfigs();
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Model Configurations',
+      defaultPath: `apex-configs-${Date.now()}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (!result.canceled && result.filePath) {
+      // Strip sensitive keys for safe export
+      const safe = configs.map(({ apiKey, ...rest }) => ({ ...rest, apiKey: apiKey ? '***REDACTED***' : '' }));
+      fs.writeFileSync(result.filePath, JSON.stringify(safe, null, 2), 'utf-8');
+      return { success: true, path: result.filePath };
+    }
+    return { success: false };
+  });
+
+  ipcMain.handle('import-configs', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import Model Configurations',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      properties: ['openFile'],
+    });
+    if (!result.canceled && result.filePaths[0]) {
+      try {
+        const imported = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf-8'));
+        if (!Array.isArray(imported)) throw new Error('Invalid format');
+        const existing = loadConfigs();
+        const merged = [...existing];
+        imported.forEach((c) => {
+          // Avoid duplicates
+          if (!merged.find((e) => e.name === c.name)) {
+            merged.push({ ...c, id: generateId(), createdAt: Date.now(), updatedAt: Date.now() });
+          }
+        });
+        saveConfigs(merged);
+        return { success: true, configs: merged, count: merged.length - existing.length };
+      } catch (err) {
+        return { success: false, error: `导入失败: ${err.message}` };
+      }
+    }
+    return { success: false };
+  });
+
+  // Auto-start
+  ipcMain.handle('get-autostart', () => getAutoStartStatus());
+  ipcMain.handle('set-autostart', (_e, enable) => {
+    const ok = setAutoStart(enable);
+    updateTrayMenu();
+    return ok;
+  });
+
+  // App info
+  ipcMain.handle('get-app-info', () => ({
+    name: APP_NAME,
+    version: APP_VERSION,
+    platform: process.platform,
+    electron: process.versions.electron,
+    node: process.versions.node,
+    chrome: process.versions.chrome,
+  }));
+
+  // Window controls
   ipcMain.handle('window-minimize', () => mainWindow.minimize());
   ipcMain.handle('window-close', () => mainWindow.close());
 }
@@ -265,7 +359,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  // Don't quit on Windows — keep running in tray
+  // Keep running in tray on Windows
 });
 
 app.on('before-quit', () => {

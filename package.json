@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist": "electron-builder --win --mac"
   },
   "build": {
     "appId": "com.apex.modelswitch",
@@ -14,17 +16,39 @@
     "directories": {
       "output": "release"
     },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
     "win": {
-      "target": "nsis",
-      "icon": "assets/icon.png"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon-256.png"
     },
     "mac": {
-      "target": "dmg",
-      "icon": "assets/icon.png"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "assets/icon-256.png",
+      "category": "public.app-category.developer-tools"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Apex Model Switch",
+      "installerIcon": "assets/icon-256.png",
+      "uninstallerIcon": "assets/icon-256.png"
     }
   },
   "author": "Apex",

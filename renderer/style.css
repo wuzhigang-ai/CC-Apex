@@ -835,6 +835,71 @@ body::after {
   line-height: 1.6;
 }
 
+/* ═══════════ List Header Actions ══════════════════════════════ */
+.list-header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ═══════════ About Dialog ═════════════════════════════════════ */
+.about-body {
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 28px 24px;
+}
+
+.about-logo {
+  color: var(--accent);
+  margin-bottom: 4px;
+  filter: drop-shadow(0 0 12px rgba(201,165,92,0.3));
+}
+
+.about-name {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, var(--gold-200), var(--gold-400), var(--gold-200));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.about-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.about-info {
+  padding: 10px 16px;
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255,255,255,0.04);
+  width: 100%;
+}
+
+.about-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.about-tagline {
+  font-size: 12px;
+  color: var(--accent-dim);
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+.about-footer {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
 /* ═══════════ Keyframe Animations ══════════════════════════════ */
 @keyframes fadeIn {
   from { opacity: 0; }

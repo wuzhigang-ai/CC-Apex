@@ -58,7 +58,11 @@
   <section id="config-list" class="config-list hidden">
     <div class="list-header">
       <h3>备用模型方案</h3>
-      <button class="btn-primary btn-sm" id="btn-add">+ 新增方案</button>
+      <div class="list-header-actions">
+        <button class="btn-secondary btn-sm" id="btn-import" title="导入配置">导入</button>
+        <button class="btn-secondary btn-sm" id="btn-export" title="导出配置">导出</button>
+        <button class="btn-primary btn-sm" id="btn-add">+ 新增方案</button>
+      </div>
     </div>
     <div id="config-cards" class="config-cards"></div>
   </section>
@@ -84,7 +88,7 @@
         <input type="text" id="form-model" placeholder="例如：claude-opus-4-7" maxlength="60" required autocomplete="off">
       </div>
       <div class="form-group">
-        <label for="form-key">ANTHROPIC_AUTH_TOKEN (API 密钥)</label>
+        <label for="form-key">ANTHROPIC_API_KEY (API 密钥)</label>
         <div class="input-wrap">
           <input type="password" id="form-key" placeholder="sk-ant-api03-..." maxlength="200" autocomplete="off">
           <button type="button" class="toggle-vis" id="toggle-key" title="显示/隐藏">
@@ -120,6 +124,34 @@
         <button type="button" class="btn-secondary" id="confirm-cancel">取消</button>
         <button type="button" class="btn-danger" id="confirm-ok">确认删除</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── About Dialog ──────────────────────────────────────────── -->
+<div id="about-overlay" class="modal-overlay hidden">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h3>关于 Apex</h3>
+      <button class="modal-close" id="about-close" aria-label="关闭">
+        <svg width="16" height="16" viewBox="0 0 16 16"><line x1="2" y1="2" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="14" y1="2" x2="2" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal-body about-body">
+      <div class="about-logo">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 22 20 2 20"/>
+          <line x1="12" y1="9" x2="12" y2="15"/>
+          <line x1="9" y1="13" x2="15" y2="13"/>
+        </svg>
+      </div>
+      <h2 class="about-name">Apex</h2>
+      <p class="about-desc">Claude Code 模型快速切换桌面应用</p>
+      <div class="about-info" id="about-info">
+        <span class="about-meta">版本 1.0.0 · Electron · Windows / macOS</span>
+      </div>
+      <p class="about-tagline">多模型备用留存，一键切换 Claude Code</p>
+      <div class="about-footer">© 2026 Apex. All rights reserved.</div>
     </div>
   </div>
 </div>
