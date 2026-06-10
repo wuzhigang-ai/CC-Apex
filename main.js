@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog } = require
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawnSync } = require('child_process');
+const { execFile } = require('child_process');
 
 // ═══════════════════════════════════════════════════════════════════
 // Apex — Main Process (Production)
@@ -11,87 +11,27 @@ const { spawnSync } = require('child_process');
 const APP_NAME = 'Apex';
 const APP_VERSION = '1.0.0';
 
-// ── Windows Env Var Helper ──────────────────────────────────────────
-// Uses VBScript + WScript.Shell.Environment("USER") — native Windows API
-// No PowerShell, no spawnSync, no quoting issues, no elevation needed
-function setUserEnvVar(name, value) {
-  if (process.platform !== 'win32') return;
-  const vbsFile = path.join(os.tmpdir(), `apex-env-${name}.vbs`);
-  try {
-    // Escape double quotes for VBScript string
-    const v = (value || '').replace(/"/g, '""');
-    fs.writeFileSync(vbsFile,
-      `CreateObject("WScript.Shell").Environment("USER")("${name}")="${v}"`,
-      'utf-8'
-    );
-    const result = spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
-    return { ok: !result.error && result.status === 0, error: result.error };
-  } catch (_) {
-    return { ok: false, error: _ };
-  } finally {
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
-  }
+// ── Windows Subprocess ──────────────────────────────────────────────
+// ALL external calls use async execFile — never spawnSync (blocks main
+// thread → deadlock with Windows message loop in Electron)
+function runFile(file, args, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    execFile(file, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({ error: err, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
+    });
+  });
 }
 
-function delUserEnvVar(name) {
-  if (process.platform !== 'win32') return;
-  const vbsFile = path.join(os.tmpdir(), `apex-env-${name}.vbs`);
-  try {
-    fs.writeFileSync(vbsFile,
-      `CreateObject("WScript.Shell").Environment("USER").Remove("${name}")`,
-      'utf-8'
-    );
-    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
-  } finally {
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
-  }
-}
-
-// ── Registry Helper (for auto-start) ────────────────────────────────
-// Uses VBScript + WScript.Shell.RegWrite/RegRead — native, no PowerShell
-function regRead(key, name) {
-  const vbsFile = path.join(os.tmpdir(), 'apex-reg-read.vbs');
-  try {
-    fs.writeFileSync(vbsFile,
-      `Set o=CreateObject("WScript.Shell")\n` +
-      `On Error Resume Next\n` +
-      `v=o.RegRead("${key}\\${name}")\n` +
-      `If Err.Number=0 Then WScript.Echo v`,
-      'utf-8'
-    );
-    const r = spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
-    return r.status === 0 ? r.stdout.toString().trim() : '';
-  } catch (_) {
-    return '';
-  } finally {
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
-  }
-}
-
-function regWrite(key, name, value) {
-  const vbsFile = path.join(os.tmpdir(), 'apex-reg-write.vbs');
-  try {
-    fs.writeFileSync(vbsFile,
-      `CreateObject("WScript.Shell").RegWrite "${key}\\${name}","${value}","REG_SZ"`,
-      'utf-8'
-    );
-    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
-  } finally {
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
-  }
-}
-
-function regDelete(key, name) {
-  const vbsFile = path.join(os.tmpdir(), 'apex-reg-del.vbs');
-  try {
-    fs.writeFileSync(vbsFile,
-      `On Error Resume Next\nCreateObject("WScript.Shell").RegDelete "${key}\\${name}"`,
-      'utf-8'
-    );
-    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
-  } finally {
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
-  }
+function runCscript(vbsContent) {
+  // Write VBScript to temp file, execute via cscript, return Promise
+  const f = path.join(os.tmpdir(), `apex-${Date.now().toString(36)}.vbs`);
+  return new Promise((resolve) => {
+    try { fs.writeFileSync(f, vbsContent, 'utf-8'); } catch (e) { return resolve({ error: e }); }
+    execFile('cscript.exe', ['//Nologo', f], { timeout: 10000, windowsHide: true }, (err, stdout) => {
+      try { fs.unlinkSync(f); } catch (_) {}
+      resolve({ error: err, stdout: (stdout || '').trim() });
+    });
+  });
 }
 
 // ── Paths ──────────────────────────────────────────────────────────
@@ -134,30 +74,70 @@ function writeClaudeSettings(settings) {
 }
 
 // ── System Env Var Sync (all platforms) ─────────────────────────────
-function syncSystemEnvVars(modelConfig) {
-  if (process.platform === 'win32') return syncWindowsEnvVars(modelConfig);
+// Windows: Machine-level (system) env vars via elevated PowerShell + UAC
+// macOS/Linux: ~/.profile user shell config (same as JAVA_HOME)
+async function syncSystemEnvVars(modelConfig) {
+  if (process.platform === 'win32') return syncWindowsMachineEnvVars(modelConfig);
   return syncUnixEnvVars(modelConfig);
 }
 
-function syncWindowsEnvVars(modelConfig) {
-  if (process.platform !== 'win32') return { success: true };
+async function syncWindowsMachineEnvVars(modelConfig) {
+  // Machine-level env vars require elevation.
+  // 1. Write a .ps1 with SetEnvironmentVariable('...','Machine') commands
+  // 2. Write a .vbs that ShellExecute("runas") the .ps1 → triggers UAC
+  // 3. cscript the .vbs → returns after UAC (user may approve or deny)
+  // 4. Verify vars were written
+  const base = path.join(os.tmpdir(), `apex-m-${Date.now().toString(36)}`);
+  const ps1File = base + '.ps1';
+  const vbsFile = base + '.vbs';
 
-  let ok = true;
-  if (modelConfig.modelName) {
-    const r = setUserEnvVar('ANTHROPIC_MODEL', modelConfig.modelName);
-    if (!r.ok) ok = false;
-  }
-  if (modelConfig.apiKey) {
-    const r = setUserEnvVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
-    if (!r.ok) ok = false;
-  }
-  if (modelConfig.baseUrl) {
-    const r = setUserEnvVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
-    if (!r.ok) ok = false;
-  }
-  delUserEnvVar('ANTHROPIC_AUTH_TOKEN');
+  try {
+    // Build PowerShell script
+    const psLines = [];
+    if (modelConfig.modelName) {
+      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
+    }
+    if (modelConfig.apiKey) {
+      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
+    }
+    if (modelConfig.baseUrl) {
+      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
+    }
+    psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','Machine')`);
 
-  return { success: ok, error: ok ? undefined : '环境变量写入失败' };
+    fs.writeFileSync(ps1File, '﻿' + psLines.join('\n'), 'utf-8');
+
+    // Build VBScript elevation launcher
+    // ShellExecute("runas", 1) = run elevated + wait for completion
+    fs.writeFileSync(vbsFile,
+      `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${ps1File}""", "", "runas", 1`,
+      'utf-8'
+    );
+
+    // Async: won't block Electron main thread
+    const { error } = await runFile('cscript.exe', ['//Nologo', vbsFile], 30000);
+
+    // Cleanup temp files
+    try { fs.unlinkSync(ps1File); } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+
+    if (error) return { success: false, error: 'UAC 未通过或超时' };
+
+    // Verify: read Machine env vars via PowerShell (async)
+    const checkPs1 = base + '-check.ps1';
+    fs.writeFileSync(checkPs1, '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')', 'utf-8');
+    const { stdout } = await runFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', checkPs1], 10000);
+    try { fs.unlinkSync(checkPs1); } catch (_) {}
+
+    const actualModel = stdout.trim();
+    const expectedModel = modelConfig.modelName || '';
+    return { success: actualModel === expectedModel, error: actualModel !== expectedModel ? '环境变量写入后验证失败' : undefined };
+
+  } catch (_) {
+    try { fs.unlinkSync(ps1File); } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+    return { success: false, error: '系统环境变量写入异常' };
+  }
 }
 
 function syncUnixEnvVars(modelConfig) {
@@ -201,11 +181,10 @@ function syncUnixEnvVars(modelConfig) {
   }
 }
 
-function applyModelConfig(modelConfig) {
+async function applyModelConfig(modelConfig) {
   const settings = readClaudeSettings() || {};
   if (!settings.env) settings.env = {};
 
-  // Snapshot for rollback
   const backup = readClaudeSettings();
 
   if (modelConfig.apiKey) {
@@ -222,11 +201,11 @@ function applyModelConfig(modelConfig) {
     settings.timeout = parseInt(modelConfig.timeout, 10);
   }
 
-  // Step 1: write settings.json
+  // Step 1: write settings.json (sync, always works)
   writeClaudeSettings(settings);
 
-  // Step 2: sync system env vars
-  const envResult = syncSystemEnvVars(modelConfig);
+  // Step 2: sync system env vars (async — UAC may be needed)
+  const envResult = await syncSystemEnvVars(modelConfig);
 
   // Rollback Step 1 if Step 2 failed
   if (!envResult.success && backup) {
@@ -240,9 +219,12 @@ function applyModelConfig(modelConfig) {
 // ── Auto-Start ──────────────────────────────────────────────────────
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 
-function getAutoStartStatus() {
+async function getAutoStartStatus() {
   if (process.platform === 'win32') {
-    return !!regRead(RUN_KEY, AUTOSTART_KEY);
+    const { stdout } = await runFile('cmd.exe', [
+      '/c', 'reg', 'query', RUN_KEY, '/v', AUTOSTART_KEY
+    ], 5000);
+    return stdout.includes(AUTOSTART_KEY);
   }
   if (process.platform === 'darwin') {
     return fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.apex.modelswitch.plist'));
@@ -250,12 +232,16 @@ function getAutoStartStatus() {
   return false;
 }
 
-function setAutoStart(enable) {
+async function setAutoStart(enable) {
   if (process.platform === 'win32') {
     if (enable) {
-      regWrite(RUN_KEY, AUTOSTART_KEY, process.execPath);
+      await runFile('cmd.exe', [
+        '/c', 'reg', 'add', RUN_KEY, '/v', AUTOSTART_KEY, '/t', 'REG_SZ', '/d', process.execPath, '/f'
+      ], 5000);
     } else {
-      regDelete(RUN_KEY, AUTOSTART_KEY);
+      await runFile('cmd.exe', [
+        '/c', 'reg', 'delete', RUN_KEY, '/v', AUTOSTART_KEY, '/f'
+      ], 5000);
     }
   }
   if (process.platform === 'darwin') {
@@ -329,12 +315,12 @@ function createTray() {
   tray = new Tray(createTrayIcon());
   tray.setToolTip(`${APP_NAME} — Model Switch v${APP_VERSION}`);
   tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
-  updateTrayMenu();
+  updateTrayMenu(); // Fire-and-forget async
 }
 
-function updateTrayMenu() {
+async function updateTrayMenu() {
   if (!tray) return;
-  const autoStart = getAutoStartStatus();
+  const autoStart = await getAutoStartStatus();
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show Apex', click: () => { mainWindow.show(); mainWindow.focus(); } },
     { type: 'separator' },
@@ -342,7 +328,7 @@ function updateTrayMenu() {
       label: 'Launch at Startup',
       type: 'checkbox',
       checked: autoStart,
-      click: (mi) => { const ok = setAutoStart(mi.checked); mi.checked = ok; }
+      click: async (mi) => { const ok = await setAutoStart(mi.checked); mi.checked = ok; }
     },
     { type: 'separator' },
     { label: 'About Apex', click: () => { mainWindow.webContents.send('show-about'); mainWindow.show(); mainWindow.focus(); } },
@@ -377,17 +363,12 @@ function registerIpc() {
     return { success: true, configs };
   });
 
-  // Model Switch
-  ipcMain.handle('switch-model', (_e, config) => {
+  // Model Switch (async — env var sync may trigger UAC)
+  ipcMain.handle('switch-model', async (_e, config) => {
     try {
       const p = getClaudeSettingsPath();
-      const { settings, envResult } = applyModelConfig(config);
-      return {
-        success: true,
-        settings,
-        path: p,
-        envSync: envResult,
-      };
+      const { settings, envResult } = await applyModelConfig(config);
+      return { success: true, settings, path: p, envSync: envResult };
     } catch (err) {
       return { success: false, error: `写入失败: ${err.message}` };
     }
@@ -449,10 +430,10 @@ function registerIpc() {
   });
 
   // Auto-start
-  ipcMain.handle('get-autostart', () => getAutoStartStatus());
-  ipcMain.handle('set-autostart', (_e, enable) => {
-    const ok = setAutoStart(enable);
-    updateTrayMenu();
+  ipcMain.handle('get-autostart', async () => await getAutoStartStatus());
+  ipcMain.handle('set-autostart', async (_e, enable) => {
+    const ok = await setAutoStart(enable);
+    await updateTrayMenu();
     return ok;
   });
 
