@@ -23,9 +23,19 @@
       "assets/**/*"
     ],
     "win": {
-      "target": ["portable"],
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
       "icon": "assets/icon-256.png",
-      "forceCodeSigning": false
+      "forceCodeSigning": false,
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Apex"
     },
     "mac": {
       "target": ["dmg"],
