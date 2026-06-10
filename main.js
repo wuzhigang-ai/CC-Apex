@@ -99,49 +99,43 @@ function syncWindowsEnvVars(modelConfig) {
 }
 
 function syncUnixEnvVars(modelConfig) {
-  // macOS / Linux: write /etc/profile.d/apex.sh via admin elevation
-  // This file is sourced by all login shells, providing system-wide env vars
-  const isMac = process.platform === 'darwin';
+  // macOS / Linux: write user-level shell profile (same as JAVA_HOME pattern)
+  // No admin password needed. New terminal sessions auto-load ~/.profile
+  const homeEnvFile = path.join(os.homedir(), '.profile');
+
+  const marker = '# >>> Apex Model Switch (managed block) >>>';
+  const endMarker = '# <<< Apex Model Switch <<<';
+
+  const newBlock = [
+    marker,
+    `export ANTHROPIC_MODEL="${modelConfig.modelName || ''}"`,
+    `export ANTHROPIC_API_KEY="${modelConfig.apiKey || ''}"`,
+    `export ANTHROPIC_BASE_URL="${modelConfig.baseUrl || ''}"`,
+    'unset ANTHROPIC_AUTH_TOKEN',
+    endMarker,
+    '',
+  ].join('\n');
 
   try {
-    const scriptContent = [
-      '# Managed by Apex Model Switch — do not edit manually',
-      `export ANTHROPIC_MODEL="${modelConfig.modelName || ''}"`,
-      `export ANTHROPIC_API_KEY="${modelConfig.apiKey || ''}"`,
-      `export ANTHROPIC_BASE_URL="${modelConfig.baseUrl || ''}"`,
-      'unset ANTHROPIC_AUTH_TOKEN',
-      '',
-    ].join('\n');
-
-    const tmpFile = path.join(os.tmpdir(), 'apex-profile-install');
-    const installScript = [
-      '#!/bin/bash',
-      'mkdir -p /etc/profile.d',
-      `cat > /etc/profile.d/apex.sh << 'APEX_EOF'`,
-      scriptContent,
-      'APEX_EOF',
-      'chmod 644 /etc/profile.d/apex.sh',
-    ].join('\n');
-
-    fs.writeFileSync(tmpFile, installScript, { mode: 0o755 });
-
-    if (isMac) {
-      // macOS: osascript with administrator privileges (GUI password prompt)
-      execSync(`osascript -e 'do shell script "bash ${tmpFile}" with administrator privileges'`, { timeout: 30000 });
-    } else {
-      // Linux: pkexec (GUI) or sudo (CLI)
-      try {
-        execSync(`pkexec bash ${tmpFile}`, { timeout: 30000 });
-      } catch (_) {
-        execSync(`sudo bash ${tmpFile}`, { timeout: 30000 });
-      }
+    let content = '';
+    if (fs.existsSync(homeEnvFile)) {
+      content = fs.readFileSync(homeEnvFile, 'utf-8');
     }
 
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
-    return { success: fs.existsSync('/etc/profile.d/apex.sh') };
+    // Replace existing Apex block, or append if not found
+    const startIdx = content.indexOf(marker);
+    const endIdx = content.indexOf(endMarker);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+      content = content.slice(0, startIdx) + newBlock + content.slice(endIdx + endMarker.length + 1);
+    } else {
+      content = content.trimEnd() + '\n\n' + newBlock;
+    }
+
+    fs.writeFileSync(homeEnvFile, content, 'utf-8');
+    return { success: true, path: homeEnvFile };
   } catch (_) {
-    try { fs.unlinkSync(path.join(os.tmpdir(), 'apex-profile-install')); } catch (_) {}
-    return { success: false, error: '管理员授权未通过或超时' };
+    return { success: false, error: '写入 ~/.profile 失败' };
   }
 }
 
