@@ -57,30 +57,35 @@ function syncSystemEnvVars(modelConfig) {
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  // User-level env vars: no UAC, direct write, synchronous, always works
+  // Write .ps1 file + call powershell.exe directly (no shell, no quoting hell)
+  const { spawnSync } = require('child_process');
+  const tmpFile = path.join(os.tmpdir(), 'apex-user-env.ps1');
+
   try {
-    const setVar = (name, value) => {
-      if (value) {
-        execSync(
-          `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','User')"`,
-          { timeout: 5000, windowsHide: true }
-        );
-      } else {
-        execSync(
-          `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}',[System.String]::Empty,'User')"`,
-          { timeout: 5000, windowsHide: true }
-        );
-      }
-    };
+    const lines = [];
+    if (modelConfig.modelName) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','User')`);
+    }
+    if (modelConfig.apiKey) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','User')`);
+    }
+    if (modelConfig.baseUrl) {
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','User')`);
+    }
+    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','User')`);
 
-    if (modelConfig.modelName) setVar('ANTHROPIC_MODEL', modelConfig.modelName);
-    if (modelConfig.apiKey) setVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
-    if (modelConfig.baseUrl) setVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
-    setVar('ANTHROPIC_AUTH_TOKEN', null);
+    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
 
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
+    ], { timeout: 15000, windowsHide: true });
+
+    if (result.error) throw result.error;
     return { success: true };
   } catch (_) {
     return { success: false, error: '写入用户环境变量失败' };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
   }
 }
 
