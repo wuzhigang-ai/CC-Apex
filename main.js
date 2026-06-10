@@ -143,6 +143,9 @@ function applyModelConfig(modelConfig) {
   const settings = readClaudeSettings() || {};
   if (!settings.env) settings.env = {};
 
+  // Snapshot for rollback
+  const backup = readClaudeSettings();
+
   if (modelConfig.apiKey) {
     settings.env.ANTHROPIC_API_KEY = modelConfig.apiKey;
     delete settings.env.ANTHROPIC_AUTH_TOKEN;
@@ -157,8 +160,19 @@ function applyModelConfig(modelConfig) {
     settings.timeout = parseInt(modelConfig.timeout, 10);
   }
 
+  // Step 1: write settings.json
   writeClaudeSettings(settings);
-  return { settings, envResult: syncSystemEnvVars(modelConfig) };
+
+  // Step 2: sync system env vars
+  const envResult = syncSystemEnvVars(modelConfig);
+
+  // Rollback Step 1 if Step 2 failed
+  if (!envResult.success && backup) {
+    writeClaudeSettings(backup);
+    return { settings: backup, envResult };
+  }
+
+  return { settings, envResult };
 }
 
 // ── Auto-Start ──────────────────────────────────────────────────────
