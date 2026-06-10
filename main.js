@@ -89,7 +89,12 @@ async function syncSystemEnvVars(modelConfig) {
 }
 
 async function syncWindowsMachineEnvVars(modelConfig) {
-  const psFile = path.join(os.tmpdir(), `apex-m-${Date.now().toString(36)}.ps1`);
+  // Strategy: launch elevated PowerShell via VBS ShellExecute (fire-and-forget),
+  // then poll Machine env vars until they match expected values.
+  // NO Start-Process -Wait — that hangs execFile indefinitely on Windows.
+  const baseName = `apex-m-${Date.now().toString(36)}`;
+  const psFile = path.join(os.tmpdir(), baseName + '.ps1');
+  const vbsFile = path.join(os.tmpdir(), baseName + '.vbs');
 
   try {
     const lines = [];
@@ -103,41 +108,36 @@ async function syncWindowsMachineEnvVars(modelConfig) {
       lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
     }
     lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','Machine')`);
-
     fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
 
-    // Fire-and-forget: launch elevated PowerShell. May return before UAC
-    // is approved or after. We don't trust execFile's exit code.
-    await runFile('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-      `Start-Process -Verb RunAs -Wait -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${psFile.replace(/\\/g, '/')}'`
-    ], 120000); // 2 min for UAC
+    // VBScript ShellExecute("runas") → triggers UAC, returns immediately
+    fs.writeFileSync(vbsFile,
+      `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${psFile}""", "", "runas", 0`,
+      'utf-8'
+    );
+    await runFile('cscript.exe', ['//Nologo', vbsFile], 10000);
 
+    // Cleanup temp files
     try { fs.unlinkSync(psFile); } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
 
-    // Verify actual Machine values — the ONLY source of truth
-    const { stdout } = await runFile('powershell.exe', [
-      '-NoProfile', '-Command', '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
-    ], 15000);
+    // Poll Machine env vars — up to 60 times × 2s = 2 min
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const { stdout } = await runFile('powershell.exe', [
+          '-NoProfile', '-Command',
+          '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
+        ], 5000);
+        if (stdout.trim() === (modelConfig.modelName || '')) return { success: true };
+      } catch (_) {}
+    }
 
-    const actualModel = stdout.trim();
-    const expectedModel = modelConfig.modelName || '';
-
-    // Trust the actual values, not the execFile result
-    if (actualModel === expectedModel) return { success: true };
-
-    // If model doesn't match, check if UAC was denied vs just pending
-    return { success: false, error: actualModel ? '部分写入：仅 MODEL 已更新' : 'UAC 未通过：系统环境变量未更新' };
+    return { success: false, error: '超时：Machine 变量未在 2 分钟内更新' };
 
   } catch (_) {
     try { fs.unlinkSync(psFile); } catch (_) {}
-    // Even if we crashed, check if vars made it through
-    try {
-      const { stdout } = await runFile('powershell.exe', [
-        '-NoProfile', '-Command', '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
-      ], 5000);
-      if (stdout.trim() === (modelConfig.modelName || '')) return { success: true };
-    } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
     return { success: false, error: '系统环境变量写入异常' };
   }
 }
