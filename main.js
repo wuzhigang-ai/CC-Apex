@@ -57,48 +57,30 @@ function syncSystemEnvVars(modelConfig) {
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  // Write commands to temp .ps1 file to avoid command-line escaping issues.
-  // Use Start-Process -Wait to run synchronously — returns AFTER all vars written.
-  const tmpDir = os.tmpdir();
-  const psFile = path.join(tmpDir, 'apex-machine-sync.ps1');
-
+  // User-level env vars: no UAC, direct write, synchronous, always works
   try {
-    const lines = [];
-    if (modelConfig.modelName) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
-    }
-    if (modelConfig.apiKey) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
-    }
-    if (modelConfig.baseUrl) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
-    }
-    lines.push(`Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue`);
-    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',[System.String]::Empty,'Machine')`);
+    const setVar = (name, value) => {
+      if (value) {
+        execSync(
+          `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','User')"`,
+          { timeout: 5000, windowsHide: true }
+        );
+      } else {
+        execSync(
+          `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}',[System.String]::Empty,'User')"`,
+          { timeout: 5000, windowsHide: true }
+        );
+      }
+    };
 
-    fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
+    if (modelConfig.modelName) setVar('ANTHROPIC_MODEL', modelConfig.modelName);
+    if (modelConfig.apiKey) setVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
+    if (modelConfig.baseUrl) setVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
+    setVar('ANTHROPIC_AUTH_TOKEN', null);
 
-    // Synchronous elevation: -Wait blocks until elevated process completes
-    execSync(
-      `powershell -NoProfile -Command Start-Process -Verb RunAs -Wait -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${psFile.replace(/\\/g, '/')}'`,
-      { timeout: 30000, windowsHide: true }
-    );
-
-    // Verify all three are set
-    const get = (name) => execSync(
-      `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('${name}','Machine')"`,
-      { timeout: 3000, windowsHide: true }
-    ).toString().trim();
-
-    const mOk = modelConfig.modelName ? get('ANTHROPIC_MODEL') === modelConfig.modelName : true;
-    const kOk = modelConfig.apiKey ? get('ANTHROPIC_API_KEY') === modelConfig.apiKey : true;
-    const uOk = modelConfig.baseUrl ? get('ANTHROPIC_BASE_URL') === modelConfig.baseUrl : true;
-
-    return { success: mOk && kOk && uOk };
+    return { success: true };
   } catch (_) {
-    return { success: false, error: 'UAC 未通过' };
-  } finally {
-    try { fs.unlinkSync(psFile); } catch (_) {}
+    return { success: false, error: '写入用户环境变量失败' };
   }
 }
 
