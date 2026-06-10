@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electr
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execSync } = require('child_process');
 
 // ── Paths ──────────────────────────────────────────────────────────
 const USER_DATA_DIR = app.getPath('userData');
@@ -44,10 +45,41 @@ function writeClaudeSettings(settings) {
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
+function syncWindowsEnvVars(modelConfig) {
+  // Only on Windows; no-op on other platforms
+  if (process.platform !== 'win32') return;
+  try {
+    if (modelConfig.modelName) {
+      execSync(
+        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName}','User')"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    }
+    if (modelConfig.apiKey) {
+      execSync(
+        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey}','User')"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    }
+    if (modelConfig.baseUrl) {
+      execSync(
+        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl}','User')"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    }
+    // Also clean up AUTH_TOKEN to avoid conflicts
+    execSync(
+      `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User')"`,
+      { timeout: 5000, windowsHide: true }
+    );
+  } catch (err) {
+    console.error('Failed to sync Windows env vars:', err.message);
+  }
+}
+
 function applyModelConfig(modelConfig) {
   let settings = readClaudeSettings() || {};
 
-  // Merge model-specific env vars into settings
   if (!settings.env) settings.env = {};
 
   if (modelConfig.apiKey) {
@@ -65,6 +97,10 @@ function applyModelConfig(modelConfig) {
   }
 
   writeClaudeSettings(settings);
+
+  // Also sync to Windows system env vars for double guarantee
+  syncWindowsEnvVars(modelConfig);
+
   return settings;
 }
 
