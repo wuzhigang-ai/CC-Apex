@@ -183,11 +183,11 @@ function syncUnixEnvVars(modelConfig) {
   }
 }
 
-async function applyModelConfig(modelConfig) {
+function applyModelConfig(modelConfig) {
+  // Only writes settings.json — instant, reliable, cross-platform.
+  // Env var sync is fire-and-forget (see switch-model handler).
   const settings = readClaudeSettings() || {};
   if (!settings.env) settings.env = {};
-
-  const backup = readClaudeSettings();
 
   if (modelConfig.apiKey) {
     settings.env.ANTHROPIC_API_KEY = modelConfig.apiKey;
@@ -203,19 +203,8 @@ async function applyModelConfig(modelConfig) {
     settings.timeout = parseInt(modelConfig.timeout, 10);
   }
 
-  // Step 1: write settings.json (sync, always works)
   writeClaudeSettings(settings);
-
-  // Step 2: sync system env vars (async — UAC may be needed)
-  const envResult = await syncSystemEnvVars(modelConfig);
-
-  // Rollback Step 1 if Step 2 failed
-  if (!envResult.success && backup) {
-    writeClaudeSettings(backup);
-    return { settings: backup, envResult };
-  }
-
-  return { settings, envResult };
+  return { settings };
 }
 
 // ── Auto-Start ──────────────────────────────────────────────────────
@@ -365,12 +354,25 @@ function registerIpc() {
     return { success: true, configs };
   });
 
-  // Model Switch (async — env var sync may trigger UAC)
+  // Model Switch
+  // Phase 1 (instant): write settings.json → return success to UI
+  // Phase 2 (background): sync system env vars → best-effort, non-blocking
   ipcMain.handle('switch-model', async (_e, config) => {
     try {
       const p = getClaudeSettingsPath();
-      const { settings, envResult } = await applyModelConfig(config);
-      return { success: true, settings, path: p, envSync: envResult };
+      const { settings } = applyModelConfig(config);
+
+      // Fire-and-forget: env var sync in background
+      syncSystemEnvVars(config).then((envResult) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('env-sync-result', {
+            success: envResult.success,
+            error: envResult.error,
+          });
+        }
+      });
+
+      return { success: true, settings, path: p };
     } catch (err) {
       return { success: false, error: `写入失败: ${err.message}` };
     }

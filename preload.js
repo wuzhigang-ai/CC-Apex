@@ -31,4 +31,8 @@ contextBridge.exposeInMainWorld('apex', {
     ipcRenderer.on('show-about', () => callback());
     return () => ipcRenderer.removeAllListeners('show-about');
   },
+  onEnvSyncResult: (callback) => {
+    ipcRenderer.on('env-sync-result', (_e, result) => callback(result));
+    return () => ipcRenderer.removeAllListeners('env-sync-result');
+  },
 });

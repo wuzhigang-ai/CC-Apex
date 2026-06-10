@@ -31,10 +31,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupConfirm();
   setupAbout();
   setupImportExport();
+  setupEnvSyncListener();
   await loadConfigs();
   await checkCurrentSettings();
   await loadAppInfo();
 });
+
+function setupEnvSyncListener() {
+  window.apex.onEnvSyncResult((r) => {
+    if (r && r.success) {
+      showStatus('success', '系统环境变量已同步更新');
+    } else {
+      showStatus('error', `系统环境变量同步失败：${(r && r.error) || '未知'}`);
+    }
+    setTimeout(hideStatus, 5000);
+  });
+}
 
 // ── Title Bar ─────────────────────────────────────────────────────
 function setupTitlebar() {
@@ -167,13 +179,8 @@ async function handleSwitch(id) {
     if (result && result.success) {
       activeConfigId = id;
       render();
-      const sync = result.envSync || {};
-      if (!sync.success) {
-        showStatus('error', `环境变量写入失败（${sync.error || '未知错误'}），settings.json 已回滚`);
-      } else {
-        showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效`);
-      }
-      setTimeout(hideStatus, 6000);
+      showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效`);
+      setTimeout(hideStatus, 5000);
     } else {
       showStatus('error', `切换失败：${(result && result.error) || '未知错误'}`);
       setTimeout(hideStatus, 5000);
