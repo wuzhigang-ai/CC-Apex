@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:;">
+<title>Apex — Claude Code Model Switch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Title Bar ────────────────────────────────────────────── -->
+<header id="titlebar">
+  <div class="titlebar-brand">
+    <svg class="logo" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="12 2 22 20 2 20"/>
+      <line x1="12" y1="10" x2="12" y2="16"/>
+    </svg>
+    <span class="titlebar-name">Apex</span>
+    <span class="titlebar-version">v1.0</span>
+  </div>
+  <div class="titlebar-actions">
+    <button class="tb-btn" id="btn-minimize" title="最小化到托盘" aria-label="最小化">
+      <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" rx="0.75" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-btn tb-btn-close" id="btn-close" title="关闭窗口" aria-label="关闭">
+      <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1" y1="1" x2="11" y2="11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ── Status Bar ───────────────────────────────────────────── -->
+<div id="status-bar" class="status-bar hidden">
+  <span class="status-icon"></span>
+  <span class="status-text"></span>
+</div>
+
+<!-- ── Main Content ──────────────────────────────────────────── -->
+<main id="main-content">
+  <!-- Hero area (when no configs) -->
+  <section id="empty-state" class="empty-state">
+    <div class="empty-icon">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+        <polygon points="12 2 22 20 2 20"/>
+        <circle cx="12" cy="14" r="2"/>
+      </svg>
+    </div>
+    <h2>欢迎使用 Apex</h2>
+    <p>Claude Code 模型一键切换 · 多套配置备用留存</p>
+    <button class="btn-primary" id="btn-empty-add">+ 创建首个备用方案</button>
+  </section>
+
+  <!-- Config list -->
+  <section id="config-list" class="config-list hidden">
+    <div class="list-header">
+      <h3>备用模型方案</h3>
+      <button class="btn-primary btn-sm" id="btn-add">+ 新增方案</button>
+    </div>
+    <div id="config-cards" class="config-cards"></div>
+  </section>
+</main>
+
+<!-- ── Modal Overlay ─────────────────────────────────────────── -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">新增备用方案</h3>
+      <button class="modal-close" id="modal-close" aria-label="关闭">
+        <svg width="16" height="16" viewBox="0 0 16 16"><line x1="2" y1="2" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="14" y1="2" x2="2" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <form id="config-form" class="modal-body">
+      <input type="hidden" id="form-id">
+      <div class="form-group">
+        <label for="form-name">方案名称 <span class="required">*</span></label>
+        <input type="text" id="form-name" placeholder="例如：Claude Opus 4.7" maxlength="40" required autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label for="form-model">模型名称 <span class="required">*</span></label>
+        <input type="text" id="form-model" placeholder="例如：claude-opus-4-7" maxlength="60" required autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label for="form-key">ANTHROPIC_AUTH_TOKEN (API 密钥)</label>
+        <div class="input-wrap">
+          <input type="password" id="form-key" placeholder="sk-ant-api03-..." maxlength="200" autocomplete="off">
+          <button type="button" class="toggle-vis" id="toggle-key" title="显示/隐藏">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="form-url">ANTHROPIC_BASE_URL (接口地址)</label>
+        <input type="url" id="form-url" placeholder="https://api.anthropic.com" maxlength="200" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label for="form-timeout">超时时间 (毫秒)</label>
+        <input type="number" id="form-timeout" placeholder="600000" min="1000" max="3600000" step="1000" autocomplete="off">
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" id="modal-cancel">取消</button>
+        <button type="submit" class="btn-primary">保存方案</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── Confirm Dialog ────────────────────────────────────────── -->
+<div id="confirm-overlay" class="modal-overlay hidden">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h3>确认删除</h3>
+    </div>
+    <div class="modal-body">
+      <p id="confirm-text">确定要删除此备用方案吗？此操作不可撤销。</p>
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" id="confirm-cancel">取消</button>
+        <button type="button" class="btn-danger" id="confirm-ok">确认删除</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
