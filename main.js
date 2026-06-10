@@ -11,26 +11,86 @@ const { spawnSync } = require('child_process');
 const APP_NAME = 'Apex';
 const APP_VERSION = '1.0.0';
 
-// ── PowerShell Helper ───────────────────────────────────────────────
-// ALL PowerShell calls go through here — .ps1 file + spawnSync
-// Zero shell involvement, zero quoting issues, cross-platform safe
-function runPowerShell(commands) {
-  if (process.platform !== 'win32') return { stdout: '', stderr: '', status: 0 };
-  const tmpFile = path.join(os.tmpdir(), 'apex-ps-cmd.ps1');
+// ── Windows Env Var Helper ──────────────────────────────────────────
+// Uses VBScript + WScript.Shell.Environment("USER") — native Windows API
+// No PowerShell, no spawnSync, no quoting issues, no elevation needed
+function setUserEnvVar(name, value) {
+  if (process.platform !== 'win32') return;
+  const vbsFile = path.join(os.tmpdir(), `apex-env-${name}.vbs`);
   try {
-    const lines = Array.isArray(commands) ? commands : [commands];
-    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpFile
-    ], { timeout: 15000, windowsHide: true });
-    return {
-      stdout: result.stdout.toString().trim(),
-      stderr: result.stderr.toString().trim(),
-      status: result.status,
-      error: result.error,
-    };
+    // Escape double quotes for VBScript string
+    const v = (value || '').replace(/"/g, '""');
+    fs.writeFileSync(vbsFile,
+      `CreateObject("WScript.Shell").Environment("USER")("${name}")="${v}"`,
+      'utf-8'
+    );
+    const result = spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
+    return { ok: !result.error && result.status === 0, error: result.error };
+  } catch (_) {
+    return { ok: false, error: _ };
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+  }
+}
+
+function delUserEnvVar(name) {
+  if (process.platform !== 'win32') return;
+  const vbsFile = path.join(os.tmpdir(), `apex-env-${name}.vbs`);
+  try {
+    fs.writeFileSync(vbsFile,
+      `CreateObject("WScript.Shell").Environment("USER").Remove("${name}")`,
+      'utf-8'
+    );
+    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
+  } finally {
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+  }
+}
+
+// ── Registry Helper (for auto-start) ────────────────────────────────
+// Uses VBScript + WScript.Shell.RegWrite/RegRead — native, no PowerShell
+function regRead(key, name) {
+  const vbsFile = path.join(os.tmpdir(), 'apex-reg-read.vbs');
+  try {
+    fs.writeFileSync(vbsFile,
+      `Set o=CreateObject("WScript.Shell")\n` +
+      `On Error Resume Next\n` +
+      `v=o.RegRead("${key}\\${name}")\n` +
+      `If Err.Number=0 Then WScript.Echo v`,
+      'utf-8'
+    );
+    const r = spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
+    return r.status === 0 ? r.stdout.toString().trim() : '';
+  } catch (_) {
+    return '';
+  } finally {
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+  }
+}
+
+function regWrite(key, name, value) {
+  const vbsFile = path.join(os.tmpdir(), 'apex-reg-write.vbs');
+  try {
+    fs.writeFileSync(vbsFile,
+      `CreateObject("WScript.Shell").RegWrite "${key}\\${name}","${value}","REG_SZ"`,
+      'utf-8'
+    );
+    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
+  } finally {
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
+  }
+}
+
+function regDelete(key, name) {
+  const vbsFile = path.join(os.tmpdir(), 'apex-reg-del.vbs');
+  try {
+    fs.writeFileSync(vbsFile,
+      `On Error Resume Next\nCreateObject("WScript.Shell").RegDelete "${key}\\${name}"`,
+      'utf-8'
+    );
+    spawnSync('cscript.exe', ['//Nologo', vbsFile], { timeout: 5000, windowsHide: true });
+  } finally {
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
   }
 }
 
@@ -80,20 +140,24 @@ function syncSystemEnvVars(modelConfig) {
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  const commands = [];
+  if (process.platform !== 'win32') return { success: true };
+
+  let ok = true;
   if (modelConfig.modelName) {
-    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','User')`);
+    const r = setUserEnvVar('ANTHROPIC_MODEL', modelConfig.modelName);
+    if (!r.ok) ok = false;
   }
   if (modelConfig.apiKey) {
-    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','User')`);
+    const r = setUserEnvVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
+    if (!r.ok) ok = false;
   }
   if (modelConfig.baseUrl) {
-    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','User')`);
+    const r = setUserEnvVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
+    if (!r.ok) ok = false;
   }
-  commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','User')`);
+  delUserEnvVar('ANTHROPIC_AUTH_TOKEN');
 
-  const result = runPowerShell(commands);
-  return { success: !result.error, error: result.error ? result.error.message : undefined };
+  return { success: ok, error: ok ? undefined : '环境变量写入失败' };
 }
 
 function syncUnixEnvVars(modelConfig) {
@@ -174,12 +238,11 @@ function applyModelConfig(modelConfig) {
 }
 
 // ── Auto-Start ──────────────────────────────────────────────────────
+const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+
 function getAutoStartStatus() {
   if (process.platform === 'win32') {
-    const result = runPowerShell(
-      `(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction Stop).'${AUTOSTART_KEY}'`
-    );
-    return result.status === 0 && result.stdout.length > 0;
+    return !!regRead(RUN_KEY, AUTOSTART_KEY);
   }
   if (process.platform === 'darwin') {
     return fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.apex.modelswitch.plist'));
@@ -190,13 +253,9 @@ function getAutoStartStatus() {
 function setAutoStart(enable) {
   if (process.platform === 'win32') {
     if (enable) {
-      runPowerShell(
-        `Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -Value '${process.execPath}'`
-      );
+      regWrite(RUN_KEY, AUTOSTART_KEY, process.execPath);
     } else {
-      runPowerShell(
-        `Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name '${AUTOSTART_KEY}' -ErrorAction SilentlyContinue`
-      );
+      regDelete(RUN_KEY, AUTOSTART_KEY);
     }
   }
   if (process.platform === 'darwin') {
