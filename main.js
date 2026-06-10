@@ -82,60 +82,50 @@ async function syncSystemEnvVars(modelConfig) {
 }
 
 async function syncWindowsMachineEnvVars(modelConfig) {
-  // Machine-level env vars require elevation.
-  // 1. Write a .ps1 with SetEnvironmentVariable('...','Machine') commands
-  // 2. Write a .vbs that ShellExecute("runas") the .ps1 → triggers UAC
-  // 3. cscript the .vbs → returns after UAC (user may approve or deny)
-  // 4. Verify vars were written
-  const base = path.join(os.tmpdir(), `apex-m-${Date.now().toString(36)}`);
-  const ps1File = base + '.ps1';
-  const vbsFile = base + '.vbs';
+  // 1. Write .ps1 with SetEnvironmentVariable(Machine) commands
+  // 2. PowerShell Start-Process -Verb RunAs -Wait → UAC + sync write
+  // 3. execFile (async) → no Electron main thread blocking
+  const psFile = path.join(os.tmpdir(), `apex-m-${Date.now().toString(36)}.ps1`);
 
   try {
-    // Build PowerShell script
-    const psLines = [];
+    const lines = [];
     if (modelConfig.modelName) {
-      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
     }
     if (modelConfig.apiKey) {
-      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
     }
     if (modelConfig.baseUrl) {
-      psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
     }
-    psLines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','Machine')`);
+    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','','Machine')`);
 
-    fs.writeFileSync(ps1File, '﻿' + psLines.join('\n'), 'utf-8');
+    fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
 
-    // Build VBScript elevation launcher
-    // ShellExecute("runas", 1) = run elevated + wait for completion
-    fs.writeFileSync(vbsFile,
-      `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${ps1File}""", "", "runas", 1`,
-      'utf-8'
-    );
+    // async execFile → no main-thread blocking → no timeout
+    // Start-Process -Verb RunAs -Wait → UAC prompt → sync write → return
+    const { error } = await runFile('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-Command',
+      `Start-Process -Verb RunAs -Wait -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${psFile.replace(/\\/g, '/')}'`
+    ], 60000);
 
-    // Async: won't block Electron main thread
-    const { error } = await runFile('cscript.exe', ['//Nologo', vbsFile], 30000);
-
-    // Cleanup temp files
-    try { fs.unlinkSync(ps1File); } catch (_) {}
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
+    try { fs.unlinkSync(psFile); } catch (_) {}
 
     if (error) return { success: false, error: 'UAC 未通过或超时' };
 
-    // Verify: read Machine env vars via PowerShell (async)
-    const checkPs1 = base + '-check.ps1';
-    fs.writeFileSync(checkPs1, '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')', 'utf-8');
-    const { stdout } = await runFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', checkPs1], 10000);
-    try { fs.unlinkSync(checkPs1); } catch (_) {}
+    // Verify
+    const { stdout } = await runFile('powershell.exe', [
+      '-NoProfile', '-Command', '[Environment]::GetEnvironmentVariable(\'ANTHROPIC_MODEL\',\'Machine\')'
+    ], 10000);
 
     const actualModel = stdout.trim();
     const expectedModel = modelConfig.modelName || '';
-    return { success: actualModel === expectedModel, error: actualModel !== expectedModel ? '环境变量写入后验证失败' : undefined };
+    return { success: actualModel === expectedModel, error: actualModel !== expectedModel ? '写入后验证失败' : undefined };
 
   } catch (_) {
-    try { fs.unlinkSync(ps1File); } catch (_) {}
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
+    try { fs.unlinkSync(psFile); } catch (_) {}
     return { success: false, error: '系统环境变量写入异常' };
   }
 }
