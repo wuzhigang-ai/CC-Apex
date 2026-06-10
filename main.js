@@ -180,21 +180,32 @@ function registerIpc() {
 
   ipcMain.handle('switch-model', (_e, config) => {
     try {
+      const p = getClaudeSettingsPath();
+      if (!fs.existsSync(p)) {
+        return {
+          success: false,
+          error: `未找到 Claude Code 配置文件\n预期路径: ${p}\n\n请确认 Claude Code 已正确安装。`,
+          path: p,
+        };
+      }
       const result = applyModelConfig(config);
-      return { success: true, settings: result };
+      return { success: true, settings: result, path: p };
     } catch (err) {
-      return { success: false, error: err.message };
+      return { success: false, error: `写入失败: ${err.message}\n请检查文件权限。` };
     }
   });
 
   ipcMain.handle('get-current-settings', () => {
     const settings = readClaudeSettings();
-    return { settings, configPath: getClaudeSettingsPath() };
+    const p = getClaudeSettingsPath();
+    return { settings, configPath: p, exists: fs.existsSync(p) };
   });
 
   ipcMain.handle('detect-claude', () => {
     const p = getClaudeSettingsPath();
-    return { exists: fs.existsSync(p), path: p };
+    const exists = fs.existsSync(p);
+    const dirExists = fs.existsSync(path.dirname(p));
+    return { exists, path: p, claudeDirExists: dirExists };
   });
 
   ipcMain.handle('window-minimize', () => mainWindow.minimize());
