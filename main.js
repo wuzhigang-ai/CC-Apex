@@ -51,38 +51,92 @@ function writeClaudeSettings(settings) {
 }
 
 // ── Windows Env Var Sync ────────────────────────────────────────────
-function syncWindowsEnvVars(modelConfig) {
-  if (process.platform !== 'win32') return { success: true };
+function setWinEnvVar(name, value, scope) {
+  // Sets a Windows env var at given scope. Returns true on success.
   try {
-    // Write commands to a temp .ps1 file to avoid quote-escaping hell
-    const tmpFile = path.join(os.tmpdir(), 'apex-env-sync.ps1');
-    const lines = [];
-    if (modelConfig.modelName) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
+    if (value) {
+      const v = value.replace(/'/g, "''");
+      execSync(
+        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}','${v}','${scope}')"`,
+        { timeout: 5000, windowsHide: true }
+      );
+    } else {
+      execSync(
+        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}',$null,'${scope}')"`,
+        { timeout: 5000, windowsHide: true }
+      );
     }
-    if (modelConfig.apiKey) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
-    }
-    if (modelConfig.baseUrl) {
-      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
-    }
-    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',$null,'Machine')`);
-
-    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8'); // UTF-8 BOM for PowerShell
-
-    // Elevated execution using array args (no quote escaping needed)
-    const psArgs = `-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '${tmpFile.replace(/\\/g, '/')}'`;
-    execSync(
-      `powershell -NoProfile -Command Start-Process -Verb RunAs -Wait powershell -ArgumentList "${psArgs}"`,
-      { timeout: 30000, windowsHide: true }
-    );
-
-    // Clean up temp file
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.message };
+    return true;
+  } catch (_) {
+    return false;
   }
+}
+
+function syncEnvVars(modelConfig) {
+  // Three-layer strategy for maximum robustness:
+  //   Layer 1: settings.json          (Claude Code native, always works)
+  //   Layer 2: User env vars           (no UAC, always works)
+  //   Layer 3: Machine env vars        (requires UAC, best-effort)
+  // Even if Layer 3 fails (user dismisses UAC), Layer 2 ensures reliability.
+
+  const vars = [];
+  if (modelConfig.modelName) vars.push(['ANTHROPIC_MODEL', modelConfig.modelName]);
+  if (modelConfig.apiKey) vars.push(['ANTHROPIC_API_KEY', modelConfig.apiKey]);
+  if (modelConfig.baseUrl) vars.push(['ANTHROPIC_BASE_URL', modelConfig.baseUrl]);
+  vars.push(['ANTHROPIC_AUTH_TOKEN', null]); // Cleanse conflicts
+
+  const result = { user: true, machine: false, errors: [] };
+
+  // Layer 2: User scope (always works, no elevation needed)
+  for (const [name, value] of vars) {
+    if (!setWinEnvVar(name, value, 'User')) {
+      result.user = false;
+      result.errors.push(`User/${name}`);
+    }
+  }
+
+  // Layer 3: Machine scope (best-effort, needs UAC approval)
+  if (process.platform === 'win32') {
+    try {
+      const tmpFile = path.join(os.tmpdir(), 'apex-env-sync.ps1');
+      const lines = [];
+      for (const [name, value] of vars) {
+        if (value) {
+          const v = value.replace(/'/g, "''");
+          lines.push(`[Environment]::SetEnvironmentVariable('${name}','${v}','Machine')`);
+        } else {
+          lines.push(`[Environment]::SetEnvironmentVariable('${name}',$null,'Machine')`);
+        }
+      }
+      fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
+
+      // Use VBScript ShellExecute for more reliable elevation
+      const vbsFile = tmpFile.replace('.ps1', '.vbs');
+      const vbsScript = [
+        'Set UAC = CreateObject("Shell.Application")',
+        `UAC.ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${tmpFile.replace(/\\/g, '\\\\')}""", "", "runas", 0`,
+      ].join('\n');
+      fs.writeFileSync(vbsFile, vbsScript, 'utf-8');
+
+      execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
+
+      // Verify at least model was set
+      try {
+        const check = execSync(
+          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('ANTHROPIC_MODEL','Machine')"`,
+          { timeout: 3000, windowsHide: true }
+        ).toString().trim();
+        result.machine = !!check;
+      } catch (_) {}
+
+      try { fs.unlinkSync(tmpFile); } catch (_) {}
+      try { fs.unlinkSync(vbsFile); } catch (_) {}
+    } catch (_) {
+      result.errors.push('Machine/UAC');
+    }
+  }
+
+  return result;
 }
 
 function applyModelConfig(modelConfig) {
@@ -104,7 +158,7 @@ function applyModelConfig(modelConfig) {
   }
 
   writeClaudeSettings(settings);
-  return settings;
+  return { settings, envResult: syncEnvVars(modelConfig) };
 }
 
 // ── Auto-Start ──────────────────────────────────────────────────────
@@ -264,8 +318,7 @@ function registerIpc() {
   ipcMain.handle('switch-model', (_e, config) => {
     try {
       const p = getClaudeSettingsPath();
-      const settings = applyModelConfig(config);
-      const envResult = syncWindowsEnvVars(config);
+      const { settings, envResult } = applyModelConfig(config);
       return {
         success: true,
         settings,
