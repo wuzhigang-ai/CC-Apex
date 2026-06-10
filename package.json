@@ -8,8 +8,7 @@
     "pack": "electron-builder --dir",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux",
-    "dist:all": "electron-builder --win --mac --linux"
+    "dist:linux": "electron-builder --linux"
   },
   "build": {
     "appId": "com.apex.modelswitch",
@@ -24,36 +23,20 @@
       "assets/**/*"
     ],
     "win": {
-      "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
-      ],
-      "icon": "assets/icon-256.png"
+      "target": ["portable"],
+      "icon": "assets/icon-256.png",
+      "forceCodeSigning": false
     },
     "mac": {
-      "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] }
-      ],
+      "target": ["dmg"],
       "icon": "assets/icon-256.png",
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "forceCodeSigning": false
     },
     "linux": {
-      "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] },
-        { "target": "rpm", "arch": ["x64"] }
-      ],
+      "target": ["AppImage", "deb"],
       "icon": "assets/icon-256.png",
       "category": "Development"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Apex Model Switch",
-      "installerIcon": "assets/icon-256.png",
-      "uninstallerIcon": "assets/icon-256.png"
     }
   },
   "author": "Apex",
