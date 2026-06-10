@@ -53,19 +53,27 @@ function writeClaudeSettings(settings) {
 // ── Windows Env Var Sync ────────────────────────────────────────────
 function syncWindowsEnvVars(modelConfig) {
   if (process.platform !== 'win32') return { success: true };
-  const results = [];
   try {
-    const setVar = (name, value) => {
-      const cmd = value
-        ? `[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','User')`
-        : `[Environment]::SetEnvironmentVariable('${name}',$null,'User')`;
-      execSync(`powershell -NoProfile -Command "${cmd}"`, { timeout: 5000, windowsHide: true });
-    };
+    const commands = [];
+    if (modelConfig.modelName) {
+      const v = modelConfig.modelName.replace(/'/g, "''");
+      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${v}','Machine')`);
+    }
+    if (modelConfig.apiKey) {
+      const v = modelConfig.apiKey.replace(/'/g, "''");
+      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${v}','Machine')`);
+    }
+    if (modelConfig.baseUrl) {
+      const v = modelConfig.baseUrl.replace(/'/g, "''");
+      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${v}','Machine')`);
+    }
+    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',$null,'Machine')`);
 
-    if (modelConfig.modelName) setVar('ANTHROPIC_MODEL', modelConfig.modelName);
-    if (modelConfig.apiKey) setVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
-    if (modelConfig.baseUrl) setVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
-    setVar('ANTHROPIC_AUTH_TOKEN', null); // Cleanse to avoid conflicts
+    const script = commands.join('; ');
+    execSync(
+      `powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile -Command \\"${script}\\"' -Wait"`,
+      { timeout: 30000, windowsHide: true }
+    );
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
