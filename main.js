@@ -50,93 +50,55 @@ function writeClaudeSettings(settings) {
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
-// ── Windows Env Var Sync ────────────────────────────────────────────
-function setWinEnvVar(name, value, scope) {
-  // Sets a Windows env var at given scope. Returns true on success.
+// ── System Env Var Sync (Machine-level) ──────────────────────────────
+function syncSystemEnvVars(modelConfig) {
+  // Writes ANTHROPIC_MODEL / API_KEY / BASE_URL to Windows System env vars.
+  // Uses VBScript ShellExecute("runas") for UAC elevation.
+  // On non-Windows, no-op — macOS/Linux rely solely on settings.json.
+  if (process.platform !== 'win32') return { success: true };
+
+  const tmpDir = os.tmpdir();
+  const psFile = path.join(tmpDir, 'apex-machine-sync.ps1');
+  const vbsFile = path.join(tmpDir, 'apex-machine-sync.vbs');
+
   try {
-    if (value) {
-      const v = value.replace(/'/g, "''");
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}','${v}','${scope}')"`,
-        { timeout: 5000, windowsHide: true }
-      );
-    } else {
-      execSync(
-        `powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('${name}',$null,'${scope}')"`,
-        { timeout: 5000, windowsHide: true }
-      );
-    }
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-function syncEnvVars(modelConfig) {
-  // Three-layer strategy for maximum robustness:
-  //   Layer 1: settings.json          (Claude Code native, always works)
-  //   Layer 2: User env vars           (no UAC, always works)
-  //   Layer 3: Machine env vars        (requires UAC, best-effort)
-  // Even if Layer 3 fails (user dismisses UAC), Layer 2 ensures reliability.
-
-  const vars = [];
-  if (modelConfig.modelName) vars.push(['ANTHROPIC_MODEL', modelConfig.modelName]);
-  if (modelConfig.apiKey) vars.push(['ANTHROPIC_API_KEY', modelConfig.apiKey]);
-  if (modelConfig.baseUrl) vars.push(['ANTHROPIC_BASE_URL', modelConfig.baseUrl]);
-  vars.push(['ANTHROPIC_AUTH_TOKEN', null]); // Cleanse conflicts
-
-  const result = { user: true, machine: false, errors: [] };
-
-  // Layer 2: User scope (always works, no elevation needed)
-  for (const [name, value] of vars) {
-    if (!setWinEnvVar(name, value, 'User')) {
-      result.user = false;
-      result.errors.push(`User/${name}`);
-    }
-  }
-
-  // Layer 3: Machine scope (best-effort, needs UAC approval)
-  if (process.platform === 'win32') {
-    try {
-      const tmpFile = path.join(os.tmpdir(), 'apex-env-sync.ps1');
-      const lines = [];
-      for (const [name, value] of vars) {
-        if (value) {
-          const v = value.replace(/'/g, "''");
-          lines.push(`[Environment]::SetEnvironmentVariable('${name}','${v}','Machine')`);
-        } else {
-          lines.push(`[Environment]::SetEnvironmentVariable('${name}',$null,'Machine')`);
-        }
+    const lines = [];
+    const addVar = (name, value) => {
+      if (value) {
+        lines.push(`[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','Machine')`);
+      } else {
+        lines.push(`[Environment]::SetEnvironmentVariable('${name}',\$null,'Machine')`);
       }
-      fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8');
+    };
 
-      // Use VBScript ShellExecute for more reliable elevation
-      const vbsFile = tmpFile.replace('.ps1', '.vbs');
-      const vbsScript = [
-        'Set UAC = CreateObject("Shell.Application")',
-        `UAC.ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${tmpFile.replace(/\\/g, '\\\\')}""", "", "runas", 0`,
-      ].join('\n');
-      fs.writeFileSync(vbsFile, vbsScript, 'utf-8');
+    if (modelConfig.modelName) addVar('ANTHROPIC_MODEL', modelConfig.modelName);
+    if (modelConfig.apiKey) addVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
+    if (modelConfig.baseUrl) addVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
+    addVar('ANTHROPIC_AUTH_TOKEN', null);
 
-      execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
+    fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
 
-      // Verify at least model was set
-      try {
-        const check = execSync(
-          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('ANTHROPIC_MODEL','Machine')"`,
-          { timeout: 3000, windowsHide: true }
-        ).toString().trim();
-        result.machine = !!check;
-      } catch (_) {}
+    // VBScript: ShellExecute with "runas" verb for UAC elevation
+    fs.writeFileSync(vbsFile,
+      `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${psFile.replace(/\\/g, '\\\\')}""", "", "runas", 0`,
+      'utf-8'
+    );
 
-      try { fs.unlinkSync(tmpFile); } catch (_) {}
-      try { fs.unlinkSync(vbsFile); } catch (_) {}
-    } catch (_) {
-      result.errors.push('Machine/UAC');
-    }
+    execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
+
+    // Verify
+    const check = execSync(
+      `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('ANTHROPIC_MODEL','Machine')"`,
+      { timeout: 3000, windowsHide: true }
+    ).toString().trim();
+
+    return { success: !!check };
+  } catch (_) {
+    return { success: false, error: 'UAC 未通过或超时' };
+  } finally {
+    try { fs.unlinkSync(psFile); } catch (_) {}
+    try { fs.unlinkSync(vbsFile); } catch (_) {}
   }
-
-  return result;
 }
 
 function applyModelConfig(modelConfig) {
@@ -158,7 +120,7 @@ function applyModelConfig(modelConfig) {
   }
 
   writeClaudeSettings(settings);
-  return { settings, envResult: syncEnvVars(modelConfig) };
+  return { settings, envResult: syncSystemEnvVars(modelConfig) };
 }
 
 // ── Auto-Start ──────────────────────────────────────────────────────

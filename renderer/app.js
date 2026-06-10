@@ -165,11 +165,8 @@ async function handleSwitch(id) {
     activeConfigId = id;
     render();
     const sync = result.envSync || {};
-    const parts = ['settings.json ✅'];
-    if (sync.user !== false) parts.push('用户环境变量 ✅');
-    if (sync.machine) parts.push('系统环境变量 ✅');
-    else if (sync.user === false) parts.push('环境变量写入失败 ⚠️');
-    showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效 (${parts.join(' · ')})`);
+    const sysOk = sync.success ? '✅' : '⚠️ UAC';
+    showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效 (settings.json ✅ · 系统变量 ${sysOk})`);
     setTimeout(hideStatus, 6000);
   } else {
     showStatus('error', `切换失败：${result.error}`);
