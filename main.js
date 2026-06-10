@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -73,13 +73,14 @@ let mainWindow = null;
 let tray = null;
 
 function createWindow() {
+  const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     width: 480,
     height: 640,
     minWidth: 420,
     minHeight: 520,
     frame: false,
-    titleBarStyle: 'hidden',
+    ...(isMac ? { titleBarStyle: 'hidden' } : {}),
     backgroundColor: '#0a0a10',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -105,20 +106,43 @@ function createWindow() {
 }
 
 // ── Tray ────────────────────────────────────────────────────────────
+function createTrayIcon() {
+  // Generate a 16x16 gold diamond as tray icon
+  const size = 16;
+  const canvas = Buffer.alloc(size * size * 4, 0);
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = 6;
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = Math.abs(x - cx);
+      const dy = Math.abs(y - cy);
+      // Diamond shape
+      const inside = (dx / r + dy / r) <= 1.05;
+      const edge = (dx / r + dy / r) > 0.85 && (dx / r + dy / r) <= 1.05;
+
+      const i = (y * size + x) * 4;
+      if (inside) {
+        // Gold accent
+        canvas[i] = 0xC9;     // R
+        canvas[i + 1] = 0xA5; // G
+        canvas[i + 2] = 0x5C; // B
+        canvas[i + 3] = edge ? 220 : 255; // A
+      }
+    }
+  }
+  return nativeImage.createFromBuffer(canvas, { width: size, height: size });
+}
+
 function createTray() {
-  // 16x16 minimal icon — a stylized "A" diamond
-  const icon = nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAA' +
-    'NklEQVQ4jWNgGPVg1INRDwY1H0AIIKgBgwp8/P8PEwMpBgzqJhgcYAEGBQAYGGj3YFjcHxg0NLiAAAADAC2G' +
-    'QBn7AVgNAAAAAElFTkSuQmCC'
-  );
-  tray = new Tray(icon);
+  tray = new Tray(createTrayIcon());
   tray.setToolTip('Apex — Model Switch');
 
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show Apex', click: () => { mainWindow.show(); mainWindow.focus(); } },
     { type: 'separator' },
-    { label: 'Quit', click: () => { tray = null; app.quit(); } },
+    { label: 'Quit Apex', click: () => { tray = null; app.quit(); } },
   ]);
   tray.setContextMenu(contextMenu);
   tray.on('click', () => { mainWindow.show(); mainWindow.focus(); });
