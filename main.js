@@ -54,26 +54,31 @@ function writeClaudeSettings(settings) {
 function syncWindowsEnvVars(modelConfig) {
   if (process.platform !== 'win32') return { success: true };
   try {
-    const commands = [];
+    // Write commands to a temp .ps1 file to avoid quote-escaping hell
+    const tmpFile = path.join(os.tmpdir(), 'apex-env-sync.ps1');
+    const lines = [];
     if (modelConfig.modelName) {
-      const v = modelConfig.modelName.replace(/'/g, "''");
-      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${v}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_MODEL','${modelConfig.modelName.replace(/'/g, "''")}','Machine')`);
     }
     if (modelConfig.apiKey) {
-      const v = modelConfig.apiKey.replace(/'/g, "''");
-      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${v}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','${modelConfig.apiKey.replace(/'/g, "''")}','Machine')`);
     }
     if (modelConfig.baseUrl) {
-      const v = modelConfig.baseUrl.replace(/'/g, "''");
-      commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${v}','Machine')`);
+      lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','${modelConfig.baseUrl.replace(/'/g, "''")}','Machine')`);
     }
-    commands.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',$null,'Machine')`);
+    lines.push(`[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',$null,'Machine')`);
 
-    const script = commands.join('; ');
+    fs.writeFileSync(tmpFile, '﻿' + lines.join('\n'), 'utf-8'); // UTF-8 BOM for PowerShell
+
+    // Elevated execution using array args (no quote escaping needed)
+    const psArgs = `-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '${tmpFile.replace(/\\/g, '/')}'`;
     execSync(
-      `powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile -Command \\"${script}\\"' -Wait"`,
+      `powershell -NoProfile -Command Start-Process -Verb RunAs -Wait powershell -ArgumentList "${psArgs}"`,
       { timeout: 30000, windowsHide: true }
     );
+
+    // Clean up temp file
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
