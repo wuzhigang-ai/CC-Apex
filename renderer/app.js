@@ -149,31 +149,39 @@ async function handleSwitch(id) {
   if (!config) return;
 
   const card = document.querySelector(`[data-id="${id}"]`);
+  if (!card) { showStatus('error', '界面异常：未找到卡片元素'); return; }
+
   card.classList.add('switching');
-  showStatus('info', '正在切换模型配置...');
+  showStatus('info', '正在切换模型配置（等待 UAC 确认...）');
 
-  const result = await window.apex.switchModel({
-    apiKey: config.apiKey || undefined,
-    baseUrl: config.baseUrl || undefined,
-    modelName: config.modelName || undefined,
-    timeout: config.timeout || undefined,
-  });
+  try {
+    const result = await window.apex.switchModel({
+      apiKey: config.apiKey || undefined,
+      baseUrl: config.baseUrl || undefined,
+      modelName: config.modelName || undefined,
+      timeout: config.timeout || undefined,
+    });
 
-  card.classList.remove('switching');
+    card.classList.remove('switching');
 
-  if (result.success) {
-    activeConfigId = id;
-    render();
-    const sync = result.envSync || {};
-    if (!sync.success) {
-      showStatus('error', `环境变量写入失败（${sync.error || '未知错误'}），settings.json 已回滚，配置未变更`);
+    if (result && result.success) {
+      activeConfigId = id;
+      render();
+      const sync = result.envSync || {};
+      if (!sync.success) {
+        showStatus('error', `环境变量写入失败（${sync.error || '未知错误'}），settings.json 已回滚`);
+      } else {
+        showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效`);
+      }
+      setTimeout(hideStatus, 6000);
     } else {
-      showStatus('success', `已切换至「${escapeHtml(config.name)}」→ ${escapeHtml(config.modelName)} · 新终端生效 (settings.json + 环境变量 同步完成)`);
+      showStatus('error', `切换失败：${(result && result.error) || '未知错误'}`);
+      setTimeout(hideStatus, 5000);
     }
+  } catch (err) {
+    card.classList.remove('switching');
+    showStatus('error', `切换异常：${err.message || err}`);
     setTimeout(hideStatus, 6000);
-  } else {
-    showStatus('error', `切换失败：${result.error}`);
-    setTimeout(hideStatus, 5000);
   }
 }
 
