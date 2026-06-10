@@ -57,55 +57,44 @@ function syncSystemEnvVars(modelConfig) {
 }
 
 function syncWindowsEnvVars(modelConfig) {
-  const tmpDir = os.tmpdir();
-  const psFile = path.join(tmpDir, 'apex-machine-sync.ps1');
-  const vbsFile = path.join(tmpDir, 'apex-machine-sync.vbs');
+  // Build a single elevated PowerShell command — Start-Process -Wait
+  // ensures synchronous execution: command completes before we continue
+  const commands = [];
+  const addCmd = (name, value) => {
+    if (value) {
+      commands.push(`[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','Machine')`);
+    } else {
+      commands.push(`[Environment]::SetEnvironmentVariable('${name}',\$null,'Machine')`);
+    }
+  };
+
+  if (modelConfig.modelName) addCmd('ANTHROPIC_MODEL', modelConfig.modelName);
+  if (modelConfig.apiKey) addCmd('ANTHROPIC_API_KEY', modelConfig.apiKey);
+  if (modelConfig.baseUrl) addCmd('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
+  addCmd('ANTHROPIC_AUTH_TOKEN', null);
+
+  const script = commands.join('; ');
 
   try {
-    const lines = [];
-    const addVar = (name, value) => {
-      if (value) {
-        lines.push(`[Environment]::SetEnvironmentVariable('${name}','${value.replace(/'/g, "''")}','Machine')`);
-      } else {
-        lines.push(`[Environment]::SetEnvironmentVariable('${name}',\$null,'Machine')`);
-      }
-    };
-
-    if (modelConfig.modelName) addVar('ANTHROPIC_MODEL', modelConfig.modelName);
-    if (modelConfig.apiKey) addVar('ANTHROPIC_API_KEY', modelConfig.apiKey);
-    if (modelConfig.baseUrl) addVar('ANTHROPIC_BASE_URL', modelConfig.baseUrl);
-    addVar('ANTHROPIC_AUTH_TOKEN', null);
-
-    fs.writeFileSync(psFile, '﻿' + lines.join('\n'), 'utf-8');
-    fs.writeFileSync(vbsFile,
-      `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""${psFile.replace(/\\/g, '\\\\')}""", "", "runas", 0`,
-      'utf-8'
+    // Start-Process -Verb RunAs -Wait: UAC prompt → execute → return AFTER completion
+    execSync(
+      `powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','${script}'"`,
+      { timeout: 30000, windowsHide: true }
     );
 
-    execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
+    // Verify all three are set
+    const get = (name) => execSync(
+      `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('${name}','Machine')"`,
+      { timeout: 3000, windowsHide: true }
+    ).toString().trim();
 
-    // Wait for elevated PowerShell (async via ShellExecute) to finish
-    // Must verify ALL vars are written, not just MODEL
-    for (let retry = 0; retry < 15; retry++) {
-      const t0 = Date.now();
-      while (Date.now() - t0 < 1000) {}
-      try {
-        const get = (name) => execSync(
-          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('${name}','Machine')"`,
-          { timeout: 3000, windowsHide: true }
-        ).toString().trim();
-        const mOk = modelConfig.modelName ? get('ANTHROPIC_MODEL') === modelConfig.modelName : true;
-        const kOk = modelConfig.apiKey ? get('ANTHROPIC_API_KEY') === modelConfig.apiKey : true;
-        const uOk = modelConfig.baseUrl ? get('ANTHROPIC_BASE_URL') === modelConfig.baseUrl : true;
-        if (mOk && kOk && uOk) return { success: true };
-      } catch (_) {}
-    }
-    return { success: false, error: 'UAC 超时：系统变量未在 15 秒内全部更新' };
+    const mOk = modelConfig.modelName ? get('ANTHROPIC_MODEL') === modelConfig.modelName : true;
+    const kOk = modelConfig.apiKey ? get('ANTHROPIC_API_KEY') === modelConfig.apiKey : true;
+    const uOk = modelConfig.baseUrl ? get('ANTHROPIC_BASE_URL') === modelConfig.baseUrl : true;
+
+    return { success: mOk && kOk && uOk };
   } catch (_) {
     return { success: false, error: 'UAC 未通过' };
-  } finally {
-    try { fs.unlinkSync(psFile); } catch (_) {}
-    try { fs.unlinkSync(vbsFile); } catch (_) {}
   }
 }
 
