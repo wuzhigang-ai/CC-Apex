@@ -85,19 +85,22 @@ function syncWindowsEnvVars(modelConfig) {
     execSync(`cscript //Nologo "${vbsFile}"`, { timeout: 30000, windowsHide: true });
 
     // Wait for elevated PowerShell (async via ShellExecute) to finish
-    // Retry up to 15 times × 1s = max 15s wait
+    // Must verify ALL vars are written, not just MODEL
     for (let retry = 0; retry < 15; retry++) {
       const t0 = Date.now();
-      while (Date.now() - t0 < 1000) { /* 1s spin */ }
+      while (Date.now() - t0 < 1000) {}
       try {
-        const val = execSync(
-          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('ANTHROPIC_MODEL','Machine')"`,
+        const get = (name) => execSync(
+          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('${name}','Machine')"`,
           { timeout: 3000, windowsHide: true }
         ).toString().trim();
-        if (val === modelConfig.modelName) return { success: true };
+        const mOk = modelConfig.modelName ? get('ANTHROPIC_MODEL') === modelConfig.modelName : true;
+        const kOk = modelConfig.apiKey ? get('ANTHROPIC_API_KEY') === modelConfig.apiKey : true;
+        const uOk = modelConfig.baseUrl ? get('ANTHROPIC_BASE_URL') === modelConfig.baseUrl : true;
+        if (mOk && kOk && uOk) return { success: true };
       } catch (_) {}
     }
-    return { success: false, error: 'UAC 超时：系统变量未在 15 秒内更新' };
+    return { success: false, error: 'UAC 超时：系统变量未在 15 秒内全部更新' };
   } catch (_) {
     return { success: false, error: 'UAC 未通过' };
   } finally {
